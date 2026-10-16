@@ -1,3 +1,515 @@
+<h1 align="center">Cocosations</h1>
+
+<p align="center">A fork of <a href="https://codeberg.org/iNPUTmice/Conversations">Conversations</a> with call diagnostics and last activity of contacts</p>
+
+Cocosations is a Jabber/XMPP client for Android based on
+[Conversations](https://codeberg.org/iNPUTmice/Conversations) (GPLv3). The
+protocol, encryption and all other features come from the original unchanged.
+
+| | |
+|---|---|
+| Application ID | `dev.inkov.cocosations` |
+| Based on | Conversations 2.20.4 |
+| License | GPLv3, same as the original |
+| Source code | https://github.com/tzx1z/cocosations |
+| Fork author | Evgeny Inkov |
+
+Cocosations installs next to Conversations: the apps have different
+application IDs, their data and accounts do not overlap.
+
+## Screenshots
+
+<p align="center">
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/01.jpg" width="216" alt="Call screen: connection stages, media route, quality indicator and charts"/>
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/02.jpg" width="216" alt="Call report: stages, recommendation and summary"/>
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/03.jpg" width="216" alt="Report: stage timing and signaling delays"/>
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/04.jpg" width="216" alt="Report: the contact's client and its capabilities"/>
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/05.jpg" width="216" alt="Report: audio quality by direction and the MOS chart"/>
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/06.jpg" width="216" alt="Report: incoming packet loss chart and metric statistics"/>
+<img src="fastlane/metadata/android/en-US/images/phoneScreenshots/07.jpg" width="216" alt="Report: incoming jitter chart and metric statistics"/>
+</p>
+
+1. Call screen: connection stages, media route, quality indicator and charts.
+2. Call report: stages, recommendation and summary.
+3. Report: stage timing and signaling delays.
+4. Report: the contact's client and its capabilities.
+5. Report: audio quality by direction and the MOS chart.
+6. Report: incoming packet loss chart and metric statistics (min, avg, max, p95).
+7. Report: incoming jitter chart and metric statistics.
+
+## Installation
+
+Via F-Droid: add the repository https://fdroid.inkov.dev/repo. That page has a
+QR code and a link with the repository key fingerprint, which can be opened on
+a phone with F-Droid installed.
+
+The APKs are signed with the author's key, SHA-256 of the certificate:
+
+```
+015df71201ff6e6ca0db7b666bd4ae4fb24386199e80e4475f70a4c6233eb78f
+```
+
+Builds are reproducible: the APKs are built from the `v*` tags of this
+repository in the same environment as the F-Droid buildserver (Debian trixie,
+OpenJDK 25, NDK r28c).
+
+## Author
+
+Evgeny Inkov
+
+- email: me@inkov.dev
+- XMPP: tzx1z@inkov.dev
+- website: https://inkov.dev
+
+Bugs and suggestions: https://github.com/tzx1z/cocosations/issues.
+Crash reports (with the user's consent) are sent as an XMPP message to
+bugs@inkov.dev.
+
+## Differences from Conversations
+
+### Step-by-step call diagnostics
+
+The call screen shows a progress bar of four segments below the contact's
+name. Completed stages are green, the current one pulses, upcoming ones are
+grey. On failure the segment of the stage turns red and the reason is shown
+below the bar.
+
+| Segment | Stage (`CallStage`) | Confirmed by | Failure |
+|---|---|---|---|
+| Server | `CONNECTING_TO_SERVER` | the server acknowledged the JMI `propose` via XEP-0198 (without stream management: the account is online) | `FAILED_SERVER`: no acknowledgement from the own server, no network, c2s connection lost during the call |
+| Federation | `RESOLVING_REMOTE_SERVER` | a response from the contact's server: the contact's presence, XEP-0199 ping of the domain, a receipt or `ringing` | `FAILED_FEDERATION`: `remote-server-not-found`, `remote-server-timeout`, no response from the remote server before the timeout |
+| Contact | `WAITING_FOR_PEER` | `proceed` (JMI) and `session-accept` | `FAILED_DELIVERY`: the contact is offline (`service-unavailable` and similar), declined the call or did not answer |
+| Media | `ICE_NEGOTIATION` | `PeerConnectionState.CONNECTED` | `FAILED_ICE`: ICE failed, media connection lost |
+
+If both accounts are on the same server, the federation stage passes at once.
+For an incoming call the first two stages count as passed: the contact's
+message has already arrived.
+
+A report is saved for every outgoing call and every accepted incoming call
+(successful, cancelled or failed), but it does not open by itself. On the call
+screen, during the call and after a failure, it is available from the "Call
+diagnostics" menu item; after the call, from the chat menu (see below). The
+report contains:
+
+- the failed stage, the reason and the XMPP error condition;
+- the media type (audio, video) and its changes during the call;
+- what confirmed federation: the contact's presence, a server ping
+  (XEP-0199), delivery to the device, acceptance or rejection of the call;
+- the media route: direct, direct in the local network, via the own TURN, via
+  the contact's TURN or via both;
+- RTT of the selected pair and the candidate pairs from `getStats()`: check
+  state, nominated, number of requests and responses. Failed pairs show why
+  the direct path did not work;
+- the state of ICE, PeerConnection and candidate gathering;
+- STUN/TURN server addresses (without credentials);
+- local candidates with the server they came from, remote candidates, the
+  selected pair;
+- a NAT type estimate (no NAT, cone, symmetric, UDP blocked, CGNAT);
+- a recommendation for the user and the event timeline.
+
+Pair statistics are collected every 5 seconds from the start of ICE, and also
+when the ICE state or the selected pair changes. The route is also shown on
+the call screen.
+
+#### Signaling and the contact
+
+Timeline events are typed: each event has a direction (`→` sent, `←`
+received, `·` local), the time since the start of the call and the time of day
+with milliseconds. Event labels are translated, technical details (addresses,
+states, error conditions) are shown as is.
+
+The "Signaling delays" section measures the time between steps of the
+timeline.
+
+For an outgoing call:
+
+| Step | From | To |
+|---|---|---|
+| Own server | `propose` | server acknowledgement (XEP-0198) |
+| Contact's server and delivery to the device | acknowledgement or `propose` | `ringing` or receipt |
+| Contact's answer | delivery | `proceed` |
+| Media setup on this device | `proceed` | `session-initiate` |
+| Acknowledgement by the contact's device | `session-initiate` | IQ result |
+| Media setup on the contact's side | `session-initiate` | `session-accept` |
+| Media connection | `session-accept` | PeerConnection CONNECTED |
+
+For an incoming call: answering on this device, `proceed - session-initiate`
+on the contact's side, media setup here, acknowledgement of `session-accept`
+and the media connection.
+
+The "Contact's client" section: the full address of the device that accepted
+the call, the client from caps (XEP-0115, from the disco cache), the software
+version from an XEP-0092 request and supported features: JMI, Jingle RTP,
+audio, video, ICE-UDP, DTLS-SRTP, SDP offer/answer (if supported, candidates
+go into the offer and trickle ICE is not used), DTLS fingerprint verification
+via OMEMO. ICE restart is not announced in disco, so the number of ICE
+restarts in this call is shown instead.
+
+"End reason" is the condition from the Jingle `<reason>` (`busy`, `decline`,
+`connectivity-error`, `failed-application`, `security-error`, `gone`,
+`timeout` and others) with its `<text>`, or a JMI `reject` or `retract`, and
+the side that sent it. The first reason counts.
+
+The ICE section shows the result of the XEP-0215 STUN/TURN request: the number
+of servers and the response time, an empty list, an error with its condition
+or no support on the server, and the nearest expiry of the TURN credentials
+from the `expires` attribute. ICE server errors from `onIceCandidateError`
+(for example, `401 Unauthorized` or `701` for TURN) are grouped by address and
+code with a repeat count.
+
+#### Audio quality
+
+Audio streams come from the same `getStats()`:
+
+- `inbound-rtp`: the codec and its parameters (`sdpFmtpLine`, FEC, DTX),
+  received and lost packets, jitter, the average jitter buffer delay
+  (`jitterBufferDelay / jitterBufferEmittedCount`), the share of concealed
+  audio (`concealedSamples / totalSamplesReceived`);
+- `outbound-rtp`: sent packets and bitrate;
+- `remote-inbound-rtp`: loss (`fractionLost`), jitter and RTT from the
+  contact's RTCP reports, that is, the quality of the outgoing audio on the
+  contact's side;
+- `transport`: traffic of the call.
+
+Every 5 seconds a point of a time series is added to the report: RTT, loss and
+jitter in both directions, bitrate, concealment and MOS. The series keeps at
+most 720 points: on a long call it is thinned out by half and the interval
+between points grows. For each metric the report shows the minimum, average,
+maximum and p95.
+
+MOS is calculated with a simplified E-model (ITU-T G.107) separately for each
+direction: the one-way delay (RTT / 2), the jitter buffer (2 x jitter) and
+10 ms for the codec lower the R factor, each percent of loss lowers it by 2.5.
+Rating: MOS 4.0 or higher is good, 3.6 or higher is fair, lower is poor. If one
+direction is worse than the other by more than 0.2, the report marks it as the
+problem direction: incoming audio (you hear the contact worse) or outgoing
+audio (the contact hears you worse).
+
+Moments when loss in either direction exceeds 5% or RTT exceeds 300 ms are
+added to the timeline as quality degradation, the return to normal as
+recovery.
+
+Reports are kept in the call log: main screen - menu - "Call log". It lists
+the reports of all accounts, newest first, with a filter: all, successful,
+failed, not connected, poor quality (rated fair or poor). Each row shows the
+direction, contact, date, media type, connection time, result and quality
+rating. The "Clear call log" menu item deletes all reports and logs.
+
+The call report can also be opened:
+
+- from the three-dot menu of a chat and of a contact's profile: "Last call
+  report";
+- by a long press on a call message in a chat: "Call diagnostics". The item
+  is shown only if the report of that call is saved or the call took place in
+  the current session. The `remoteMsgId` of a call message equals the Jingle
+  session id.
+
+If the call is in progress or took place after the app started, the report
+from memory is shown, otherwise the saved one. Missed and declined incoming
+calls are not saved.
+
+Reports are stored as JSON files in the app's private folder
+(`files/cocosations_call_journal/<account uuid>/`), one file per call named
+`<start in ms>_<contact hash>_<session id hash>.json` (the first 16 characters
+of SHA-256). Lookups by contact and by call use the file names without reading
+the contents. A set number of the latest reports across all accounts is kept
+(Settings - Privacy - Call diagnostics - "Call reports to keep", from 1 to 500,
+1 by default); extra ones are deleted after a new report is saved. The
+database schema does not change, the files are not included in backups and
+are deleted together with the account. The `cocosations_call_reports` folder
+of the previous version (one report per contact, a different format) is
+deleted on the first access to the call log.
+
+The report screen consists of section cards: summary, stages, signaling
+delays, contact's client, audio quality, ICE, local and remote candidates,
+candidate pairs, timeline. The dot next to a section title shows its state:
+green is normal, yellow means warnings, red means failure. A tap on the title
+collapses the section; candidates, pairs and the timeline are collapsed by
+default. The "Brief / Detailed" switch leaves only the stages, the
+recommendation and the summary in brief mode, the choice is remembered.
+
+The "Audio quality" section has a time series chart: MOS, RTT, loss, jitter,
+bitrate and concealment are selected with chips, the dashed line shows the
+degradation threshold. The text report has a min / avg / max / p95 table
+instead of the chart.
+
+The "Copy report" button copies the whole text. The screen menu has "Share as
+text" and "Share as JSON". The JSON is the same format the report is stored
+in, with indentation; the file is written to `cache/cocosations_share/` for a
+short time and passed via FileProvider. The report contains IP addresses of
+candidates: review it before publishing.
+
+#### Call logging
+
+Settings - Privacy - Call diagnostics - "Call log" (off by default). When
+enabled, `logcat -v threadtime -T <call start> --pid=<pid>` runs for each call
+and writes to `cache/cocosations_call_logs/` with rotation at 1 MB; up to five
+parts are kept, that is, the end of a long call. The app can only read its own
+logcat entries. libwebrtc output to logcat at INFO level is enabled as well
+(`Logging.enableLogToDebugOutput`).
+
+2 seconds after the call ends, when the session and WebRTC shutdown is already
+logged, the parts are joined into a file next to the report in the call log:
+the same name with the `.log` extension. The log is deleted together with the
+report on rotation, when the call log is cleared and when the account is
+deleted. An unanswered incoming call has no report, and its log is deleted.
+The report menu has "Share call log", the call log marks such calls with
+"log". The log contains addresses, JIDs and session identifiers.
+
+#### Quality indicator on the call screen
+
+During an audio call a chip with the connection level (three bars and a color
+based on MOS) and the current RTT is shown below the duration. Below it are
+three charts for the last minute: MOS, RTT and incoming packet loss, each with
+a label and the current value. The line is built from every poll, the dashed
+line is the degradation threshold (MOS 3.6, RTT 300 ms, loss 5%). The MOS
+scale is 1 to 4.5; RTT is 0 to 360 ms and loss is 0 to 6%, both scales grow if
+a value is higher. A tap on the chip or the charts opens a dialog with the
+current route, MOS, RTT, loss, jitter, bitrate and concealment in both
+directions; the dialog updates together with the indicator. While the call
+screen is open, it extends the per-second `getStats()` polling (a 3-second
+lease); after the screen is closed only the regular polling every 5 seconds
+remains. In a video call the space below the duration is taken by the video,
+and the indicator is not shown.
+
+The NAT type is an estimate. It needs two observations of the external address
+of one socket from different destination addresses:
+
+- srflx candidates from different STUN servers;
+- an srflx candidate from a STUN server and a relay candidate from a UDP TURN
+  server: the `raddr` of the relay candidate holds the external address seen
+  by the TURN server. WebRTC sends STUN and UDP TURN from the same socket.
+
+If different servers see the same external address, the NAT is estimated as
+cone, if different addresses, as symmetric. STUN and TURN on the same host and
+port (the usual coturn setup) do not give a second observation: a symmetric NAT
+also keeps the port for a single destination. In that case the report says
+"behind NAT, type undetermined", and the server list in the report shows the reason. TCP
+and TLS TURN allocations are not used for the estimate. Servers are compared
+by host name and port, so two names of the same server are taken as different
+servers.
+
+#### Connection loss tone
+
+If the media connection drops in the middle of a conversation, a short quiet
+tone plays in the call audio: two notes down (660 and 440 Hz). When the
+connection is back, two notes up (660 and 880 Hz). This way a person who talks
+for a long time learns about the loss even if the contact is silently
+listening. The tone goes through AudioTrack with `USAGE_VOICE_COMMUNICATION`,
+that is, to the same device as the voice: earpiece, speakerphone or
+Bluetooth.
+
+The loss is detected by incoming audio: during a conversation the statistics of
+the audio `RtpReceiver` are polled every 250 ms, and if `packetsReceived` does
+not grow for 1 second, the loss tone plays. This is the same sign as a gap on
+the incoming loss chart, so the tone matches the gap instead of waiting for
+WebRTC to report a disconnect. Polling continues when the call screen is
+closed. The counter is tracked from the first incoming packet. Recovery means
+packets are flowing again.
+
+The fallback is `PeerConnectionState`: `DISCONNECTED` or `FAILED` after an
+established connection (WebRTC enters them after 2-3 seconds without responses
+to ICE checks). Recovery by this path is `CONNECTED` again, including after an
+ICE restart, if incoming audio is not stalled at that moment.
+
+One loss plays one tone. If the call ends during a loss, there is no recovery
+tone. If the contact stops sending RTP without a connection loss (clients that
+stop sending while muted), the tone plays too: Conversations keeps sending
+silence while muted. The answer tone `TONE_CDMA_ANSWER` plays only at the start
+of the conversation: in the original it repeated on every reconnection.
+
+#### Incoming calls via the Phone app
+
+Settings - Notifications - "Incoming calls via the Phone app" (off by default,
+available when call integration is enabled). It allows answering and declining
+calls from a watch, a headset and in a car.
+
+Normally the app's calls are self-managed: Telecom knows about them but drops
+commands from other apps and devices for them. In Android 14 `acceptRingingCall`
+and `endCall` from a watch app end with the log entry `self-mgd accept
+ignored`, and a headset button only knows a short and a long press. With this
+setting an incoming audio call is registered on a separate calling account with
+`CAPABILITY_CALL_PROVIDER` (the `SystemDialerConnectionService` component). The
+Phone app shows it and plays the ringtone, and Telecom passes answer, decline
+and hang up from a watch, headsets and a car to the app as `onAnswer`,
+`onReject` and `onDisconnect`. For such a call `PROPERTY_SELF_MANAGED` is
+removed, `setAudioModeIsVoip(true)` is enabled (otherwise audio is routed as
+for a carrier call) and reply with a message is removed: the system would send
+it as an SMS to an `xmpp:` address.
+
+The calling account has to be enabled once in the system call settings: the app
+opens that screen when the setting is turned on. Until it is enabled, Telecom
+answers `addNewIncomingCall` with a `SecurityException`, and the call is
+registered as before, self-managed. Video calls and outgoing calls do not
+change. Such calls appear in the system call history with an `xmpp:` address,
+and the ringtone comes from the phone settings, not from the app.
+
+### Call channel check
+
+Opens from the chat menu of a contact (the check starts at once) and from the
+account settings menu. It is meant for checking the channel before a call over
+a VPN or a proxy and switching to another proxy if needed. The contact does not
+take part in the check, no call is made, the microphone is not turned on. The
+check takes up to a minute, its stages and intermediate results are shown on
+the screen:
+
+1. A STUN/TURN request to the own server via XEP-0215 (10-second timeout).
+2. A separate `PeerConnection` with the same configuration as a call without
+   trickle (`GATHER_ONCE`, host TCP candidates disabled) and a receive-only
+   audio transceiver: the offer is needed only to gather candidates. Gathering
+   runs until `IceGatheringState.COMPLETE`, for at most 15 seconds. Server
+   errors come from `onIceCandidateError`.
+3. A channel via TURN for each transport (UDP, TCP, TLS). Two `PeerConnection`s
+   on the device with `iceTransportsType = RELAY` and only the TURN servers of
+   that transport exchange SDP and candidates in memory. One sends the other
+   300 packets of 120 bytes every 20 ms over an unordered DataChannel without
+   retransmissions (`maxRetransmits = 0`). With SCTP and DTLS headers this is
+   close to Opus RTP packets, and a one-way stream puts the same load on the
+   device's link as a call. The traffic path is device - VPN/proxy - TURN -
+   relay - relay - TURN - VPN/proxy - device, through the same server ports as
+   a call via relay. A transport on which TURN gave no address during
+   gathering is not checked. If a call starts, the remaining transports are
+   skipped.
+
+Channel metrics. The sender and the receiver share the same clock, so the delay
+is the device - TURN - device path without a clock offset correction. Jitter
+is calculated per RFC 3550 in arrival order, loss by packet numbers. MOS uses
+the same simplified E-model as the call report. The loop delay is taken as the
+one-way delay of a call: the loop travels the path to TURN in both directions,
+like a call with a contact in the same kind of network through the same server.
+From getStats come the selected candidate pair and the network type of the
+local candidate (`networkAdapterType` and `vpn`): they show whether traffic
+goes through the VPN.
+
+If relay - relay does not connect while addresses are allocated, the check is
+repeated with the second side without `RELAY`: its external address comes from
+STUN. If data passes this way, the server does not forward traffic between its
+own relay addresses (no hairpinning behind NAT, or the relay address is in the
+coturn `denied-peer-ip`). Then the remaining transports are checked via relay
+and the external address right away, and the verdict reports it.
+
+Result:
+
+- summary: the device network from `ConnectivityManager` (vpn, wifi,
+  cellular, ethernet), the external address from STUN and TURN (with a VPN or
+  a proxy, the address of its exit), the XEP-0215 response and the TURN
+  credentials expiry, candidate gathering time, the NAT type estimate, CGNAT,
+  IPv4 and IPv6 availability;
+- the channel via TURN per transport: MOS, average delay, jitter, loss or the
+  failure reason (TURN gave no address, data did not pass, the server does
+  not offer it);
+- channel details: connection and relay allocation time, delay (average, p95,
+  maximum), received packets, network, path and the selected candidate pair;
+- a comparison of the account's checks since the app started (up to 10):
+  external address, time and MOS per transport. After a proxy change it shows
+  what changed;
+- TURN per transport from the gathering data, each STUN/TURN server (external
+  address, relay address, error code and text), all local candidates.
+
+The verdict is based on the channel a call via relay will choose: ICE prefers
+relay over UDP, then TCP, then TLS, regardless of quality. By MOS the channel
+is good, fair or poor; if another transport has better quality, the verdict
+says so. If TURN allocated addresses but data did not pass on any transport, a
+call via relay will not connect. If the channel was not checked, the verdict is
+based on candidate gathering: the server provides no STUN/TURN, there is no
+TURN, TURN did not allocate a relay, symmetric NAT without TURN.
+
+The check covers only its own half of the path, up to its own TURN. The
+contact's network and a direct connection to the contact are not checked. The
+check runs only when the account is connected and does not start during a
+call. The report is copied and shared as text from the menu. Results are kept
+in memory until the app restarts.
+
+### Last activity of contacts
+
+- In the contact list next to the name: "online" (green dot) or "N min / h /
+  d ago" (grey dot). For a connected but inactive contact (XEP-0319 idle) the
+  time of last activity is shown.
+- In the chat list for one-to-one chats: the same label between the name and
+  the time of the last message. For visible rows of offline contacts an
+  XEP-0012 request is sent as well, with the same rate limit.
+- In the contact's profile: the exact date and time of last activity, and
+  below it the data source and the result of the XEP-0012 request:
+  - source: XEP-0319 (`idle` in presence), XEP-0256 (`jabber:iq:last` in
+    presence), XEP-0203 (the `delay` stamp in an unavailable presence), the
+    time the contact was last seen online, or XEP-0012, with the update time;
+    after an app restart until the next update, "saved earlier";
+  - XEP-0012 request: time and result (response received, the contact is
+    online, no response, the server does not support or does not disclose the
+    logout time, no access, another error with the XMPP condition); without a
+    presence subscription to the contact the request is not sent, and the
+    profile says so.
+
+  The source information is kept in memory until the app restarts.
+- In the chat title: the time of last activity, including offline contacts.
+
+Data sources, by priority:
+
+1. XEP-0319 `<idle since="..."/>` in presence.
+2. XEP-0256 `<query xmlns="jabber:iq:last" seconds="..."/>` in presence,
+   counted from `<delay/>` or from the time of receipt. In an unavailable
+   presence the server passes the user's logout time this way.
+3. XEP-0012 `jabber:iq:last` to the bare JID of an offline contact: the server
+   returns the time since logout. The request is sent only for contacts visible
+   in the list with a subscription, and at most once in 15 minutes per contact.
+
+XEP-0312 (PubSub Since) is not about activity time, so XEP-0012 is used for
+offline contacts.
+
+The time is stored in the `contacts.last_time` column: it exists in the
+database schema of the original but is not used. No migration or database
+version change is needed.
+
+If the contact's server and client do not support these XEPs, no badge is shown
+for an offline contact.
+
+### Privacy
+
+The "Show last seen" setting (Settings - Privacy, off by default) controls only
+publishing your own activity: `<idle/>` in presence, responses to XEP-0012 and
+the features in disco. The activity of others is always shown.
+
+The logout time returned by the server (XEP-0012 to the bare JID, XEP-0256 in
+response to a probe) is produced by the server itself. A client setting does
+not hide it: it depends on the server modules (`mod_lastactivity` in Prosody,
+`mod_last` in ejabberd).
+
+## Building
+
+JDK 25 (Gradle toolchain) and the Android SDK with platform 37 are required.
+Gradle downloads missing SDK components itself once the license is accepted.
+
+```
+./gradlew assembleConversationsFreeDebug
+./gradlew testConversationsFreeDebugUnitTest
+./gradlew assembleConversationsFreeRelease
+```
+
+The release build is signed with the key from `signing.properties`, as in the
+original. Without this file the APK is unsigned. The file is in `.gitignore`,
+the key is kept outside the repository:
+
+```
+keystore=/path/to/cocosations-release.p12
+keystore.password=<keystore and key password>
+keystore.alias=cocosations
+```
+
+The keystore and key passwords are the same: in PKCS12 they match. An installed
+app can only be updated with an APK signed with the same key.
+
+APKs for publishing are built in a container with the same JDK and NDK as the
+F-Droid buildserver: a build with another JDK or NDK produces different
+`classes.dex` and `.so` files.
+
+The Java packages stay `eu.siacs.conversations`, so that upstream changes can
+still be merged without mass conflicts. New resources of the fork live in files
+and names with the `cocosations_` prefix.
+
+---
+
+Below is the README of the original project.
+
 <h1 align="center">Conversations</h1>
 
 <p align="center">Conversations: the very last word in instant messaging</p>

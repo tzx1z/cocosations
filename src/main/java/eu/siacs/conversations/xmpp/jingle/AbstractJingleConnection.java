@@ -253,7 +253,9 @@ public abstract class AbstractJingleConnection {
                 future,
                 new FutureCallback<>() {
                     @Override
-                    public void onSuccess(Iq result) {}
+                    public void onSuccess(Iq result) {
+                        onIqResult(jinglePacket);
+                    }
 
                     @Override
                     public void onFailure(@NonNull Throwable t) {
@@ -267,6 +269,8 @@ public abstract class AbstractJingleConnection {
                 },
                 MoreExecutors.directExecutor());
     }
+
+    protected void onIqResult(final Iq request) {}
 
     protected void respondOk(final Iq jinglePacket) {
         this.id.account.getXmppConnection().sendResultFor(jinglePacket);

@@ -1,28 +1,35 @@
-A free and open source Jabber/XMPP client for Android. Easy to use, reliable, battery friendly. With built-in support for images, group chats and location sharing. End-to-end encrypted by default. Connects to all modern Jabber, XMPP and Snikket servers.
+Cocosations is a free and open source Jabber/XMPP client for Android based on Conversations. It keeps everything Conversations offers and adds tools that show why a call does not connect or sounds bad, a channel check for calls and the last seen time of contacts.
 
-<b>Features</b>
+<b>Call diagnostics</b>
+• Call setup progress on the call screen: server, federation, contact, media. A failed stage turns red and its reason is shown below
+• Call report for each call, available from the chat menu: XMPP errors, signaling delays, client and features of the contact, ICE servers, candidates and pairs, media route (direct or via TURN), NAT type estimate, recommendation and timeline
+• Audio quality in both directions: MOS, RTT, packet loss, jitter and bitrate, with charts on the call screen and in the report
+• A short tone in the earpiece when the media connection is lost and when it is restored
+• Call journal with filters, report export as text or JSON, optional app and WebRTC log for each call
+
+<b>Channel check for calls</b>
+Checks the path to your TURN server over UDP, TCP and TLS without calling anyone: a voice-like packet stream goes through the server and back, then delay, jitter, loss and MOS are shown. Useful before a call through a VPN or proxy.
+
+<b>Last seen</b>
+Last activity of contacts in the contact list, chat list, chat header and contact details (XEP-0319, XEP-0256, XEP-0012). Publishing your own activity is a separate setting, off by default.
+
+<b>Incoming calls via the system Phone app</b>
+Optional: incoming audio calls are shown by the system Phone app, so they can be answered or declined from a smartwatch, headset or car.
+
+<b>Features of Conversations</b>
 • End-to-end encryption with OMEMO or OpenPGP
 • Send and receive images and other kinds of files
 • Encrypted audio and video calls (DTLS-SRTP)
-• Advanced machine-in-the-middle detection via channel binding (requires opt-in)
 • Share your location
 • Send voice messages
 • Emoji reactions
-• Indication when your contact has read your message
-• Intuitive UI that follows Android design guidelines (Material Design 3 with Dynamic Colors)
-• High-resolution contact photos (avatars)
-• Synchronizes with desktop clients (Gajim and Dino)
-• Private group chats and public conferences (with support for bookmarks)
-• Message moderation for admins in public conferences
-• Address book integration
+• Private group chats and public conferences
 • Multiple accounts (unified inbox)
-• Deliver push notifications to other compatible apps like Tusky, Ltt.rs, DAVx⁵ and Fennec via UnifiedPush
+• Synchronizes with desktop clients (Gajim and Dino)
 • Very low impact on battery life
 
-<i><b>Note:</b></i> Some of these features require server support. Go to account details and select 'Server Info' from the overflow menu to see if your server has all necessary extensions.
+<i><b>Note:</b></i> Calls and the channel check need STUN/TURN on your server (XEP-0215). Some other features also require server support.
 
-<b>Design principles</b>
-• Be as beautiful and easy to use as possible without sacrificing security or privacy
-• Rely on existing, well-established protocols
-• Do not require a Google account or specifically Firebase Cloud Messaging (FCM)
-• Require as few permissions as possible
+Cocosations installs next to Conversations: the apps have different application IDs and separate data.
+
+Cocosations is maintained by Evgeny Inkov (https://inkov.dev, xmpp:tzx1z@inkov.dev). Conversations is developed by Daniel Gultsch.

@@ -30,8 +30,14 @@
 
 <resources>
     <string name="pref_about_message" translatable="false">
-			Conversations • the very last word in instant messaging.
-			\n\nCopyright © 2014-2026 Daniel Gultsch
+			Cocosations • XMPP client with call diagnostics.
+			\n\nCocosations is a modified version of Conversations.
+			\nModifications Copyright © 2026 Evgeny Inkov
+			\nmailto:me@inkov.dev
+			\nxmpp:tzx1z@inkov.dev
+			\nhttps://inkov.dev
+			\n\nBased on Conversations • the very last word in instant messaging.
+			\nCopyright © 2014-2026 Daniel Gultsch
 			\n\nThis program is free software: you can redistribute it and/or modify
 			it under the terms of the GNU General Public License as published by
 			the Free Software Foundation, either version 3 of the License, or
@@ -42,7 +48,8 @@
 			GNU General Public License for more details.
 			\n\nYou should have received a copy of the GNU General Public License
 			along with this program. If not, see https://www.gnu.org/licenses
-			\n\nDownload the full source code at https://codeberg.org/iNPUTmice/Conversations
+			\n\nDownload the full source code at https://github.com/tzx1z/cocosations
+			\n\nSource code of the original Conversations: https://codeberg.org/iNPUTmice/Conversations
 			\n\n\nThird-party libraries:
 
 			\n\nAndroid Jetpack\nhttps://android.googlesource.com/platform/frameworks/support\n(Apache License, Version 2.0)

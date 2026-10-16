@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -25,12 +26,12 @@ import androidx.core.content.ContextCompat;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import eu.siacs.conversations.AppSettings;
 import eu.siacs.conversations.Config;
 import eu.siacs.conversations.R;
 import eu.siacs.conversations.entities.Account;
 import eu.siacs.conversations.ui.RtpSessionActivity;
 import eu.siacs.conversations.xmpp.Jid;
-import eu.siacs.conversations.xmpp.jingle.AbstractJingleConnection;
 import eu.siacs.conversations.xmpp.jingle.JingleRtpConnection;
 import eu.siacs.conversations.xmpp.jingle.Media;
 import eu.siacs.conversations.xmpp.jingle.RtpEndUserState;
@@ -245,6 +246,7 @@ public class CallIntegrationConnectionService extends ConnectionService {
         } else {
             unregisterPhoneAccount(context, account);
         }
+        toggleSystemDialerAccount(context, account);
     }
 
     private static void registerPhoneAccount(final Context context, final Account account) {
@@ -307,7 +309,53 @@ public class CallIntegrationConnectionService extends ConnectionService {
             } else {
                 unregisterPhoneAccount(context, account);
             }
+            toggleSystemDialerAccount(context, account);
         }
+    }
+
+    /** Учетные записи звонков системы для входящих аудиозвонков, по настройке. */
+    public static void toggleSystemDialerAccountsAsync(
+            final Context context, final Collection<Account> accounts) {
+        ACCOUNT_REGISTRATION_EXECUTOR.execute(
+                () -> {
+                    for (final Account account : accounts) {
+                        toggleSystemDialerAccount(context, account);
+                    }
+                });
+    }
+
+    private static void toggleSystemDialerAccount(final Context context, final Account account) {
+        final var handle = getSystemDialerHandle(context, account);
+        final var telecomManager = context.getSystemService(TelecomManager.class);
+        try {
+            if (account.isEnabled()
+                    && CallIntegration.selfManaged(context)
+                    && new AppSettings(context).isSystemDialerCalls()) {
+                // повторная регистрация сохраняет включенность в настройках звонков
+                final var phoneAccount =
+                        PhoneAccount.builder(handle, context.getString(R.string.app_name))
+                                .setShortDescription(account.getJid().asBareJid().toString())
+                                .setSupportedUriSchemes(Collections.singletonList("xmpp"))
+                                .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
+                                .setIcon(Icon.createWithResource(context, R.mipmap.new_launcher))
+                                .build();
+                telecomManager.registerPhoneAccount(phoneAccount);
+            } else {
+                telecomManager.unregisterPhoneAccount(handle);
+            }
+        } catch (final IllegalArgumentException | SecurityException e) {
+            Log.w(
+                    Config.LOGTAG,
+                    "could not toggle system dialer phone account for "
+                            + account.getJid().asBareJid(),
+                    e);
+        }
+    }
+
+    public static PhoneAccountHandle getSystemDialerHandle(
+            final Context context, final Account account) {
+        return new PhoneAccountHandle(
+                new ComponentName(context, SystemDialerConnectionService.class), account.getUuid());
     }
 
     public static void unregisterPhoneAccount(final Context context, final Account account) {
@@ -319,6 +367,11 @@ public class CallIntegrationConnectionService extends ConnectionService {
             }
         } else {
             telecomManager.unregisterPhoneAccount(handle);
+        }
+        try {
+            telecomManager.unregisterPhoneAccount(getSystemDialerHandle(context, account));
+        } catch (final IllegalArgumentException | SecurityException e) {
+            Log.w(Config.LOGTAG, "could not unregister system dialer phone account", e);
         }
     }
 
@@ -381,7 +434,8 @@ public class CallIntegrationConnectionService extends ConnectionService {
     }
 
     public static boolean addNewIncomingCall(
-            final Context context, final AbstractJingleConnection.Id id) {
+            final Context context, final JingleRtpConnection rtpConnection) {
+        final var id = rtpConnection.getId();
         if (CallIntegration.notSelfManaged(context)) {
             Log.d(
                     Config.LOGTAG,
@@ -392,8 +446,6 @@ public class CallIntegrationConnectionService extends ConnectionService {
                             + ")");
             return true;
         }
-        final var phoneAccountHandle =
-                CallIntegrationConnectionService.getHandle(context, id.account);
         final var bundle = new Bundle();
         bundle.putString(
                 TelecomManager.EXTRA_INCOMING_CALL_ADDRESS,
@@ -401,9 +453,29 @@ public class CallIntegrationConnectionService extends ConnectionService {
         final var extras = new Bundle();
         extras.putString(EXTRA_SESSION_ID, id.sessionId);
         bundle.putBundle(TelecomManager.EXTRA_INCOMING_CALL_EXTRAS, extras);
+        final var telecomManager = context.getSystemService(TelecomManager.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && new AppSettings(context).isSystemDialerCalls()
+                && Media.audioOnly(rtpConnection.getMedia())) {
+            final var callIntegration = rtpConnection.getCallIntegration();
+            callIntegration.setManaged(true);
+            try {
+                telecomManager.addNewIncomingCall(
+                        getSystemDialerHandle(context, id.account), bundle);
+                Log.d(Config.LOGTAG, "added incoming call to system dialer phone account");
+                return true;
+            } catch (final SecurityException e) {
+                // учетная запись не включена в настройках звонков системы
+                Log.w(
+                        Config.LOGTAG,
+                        "system dialer phone account not available, falling back to self"
+                                + " managed",
+                        e);
+                callIntegration.setManaged(false);
+            }
+        }
         try {
-            context.getSystemService(TelecomManager.class)
-                    .addNewIncomingCall(phoneAccountHandle, bundle);
+            telecomManager.addNewIncomingCall(getHandle(context, id.account), bundle);
         } catch (final SecurityException e) {
             Log.e(
                     Config.LOGTAG,

@@ -11,6 +11,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.opengl.GLException;
 import android.os.Build;
 import android.os.Bundle;
@@ -23,12 +24,16 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.TextView;
 import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 import androidx.annotation.StringRes;
+import androidx.core.content.ContextCompat;
 import androidx.databinding.DataBindingUtil;
+import com.google.android.material.color.MaterialColors;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
@@ -41,6 +46,7 @@ import com.google.common.util.concurrent.Futures;
 import eu.siacs.conversations.Config;
 import eu.siacs.conversations.R;
 import eu.siacs.conversations.databinding.ActivityRtpSessionBinding;
+import eu.siacs.conversations.databinding.CocosationsQualityChartRowBinding;
 import eu.siacs.conversations.entities.Account;
 import eu.siacs.conversations.entities.Contact;
 import eu.siacs.conversations.entities.Conversation;
@@ -48,12 +54,17 @@ import eu.siacs.conversations.services.CallIntegration;
 import eu.siacs.conversations.services.CallIntegrationConnectionService;
 import eu.siacs.conversations.services.XmppConnectionService;
 import eu.siacs.conversations.ui.util.AvatarWorkerTask;
+import eu.siacs.conversations.ui.util.CallQualityMetric;
+import eu.siacs.conversations.ui.util.CallReportFormat;
+import eu.siacs.conversations.ui.util.CallStageBar;
 import eu.siacs.conversations.ui.util.MainThreadExecutor;
 import eu.siacs.conversations.ui.util.Rationals;
 import eu.siacs.conversations.utils.PermissionUtils;
 import eu.siacs.conversations.utils.TimeFrameUtils;
 import eu.siacs.conversations.xmpp.Jid;
 import eu.siacs.conversations.xmpp.jingle.AbstractJingleConnection;
+import eu.siacs.conversations.xmpp.jingle.CallDiagnostics;
+import eu.siacs.conversations.xmpp.jingle.CallQuality;
 import eu.siacs.conversations.xmpp.jingle.ContentAddition;
 import eu.siacs.conversations.xmpp.jingle.JingleRtpConnection;
 import eu.siacs.conversations.xmpp.jingle.Media;
@@ -130,6 +141,11 @@ public class RtpSessionActivity extends XmppActivity
 
     private ActivityRtpSessionBinding binding;
     private PowerManager.WakeLock mProximityWakeLock;
+    private CallStageBar callStageBar;
+    // после завершения intent перезаписывается без session id, а отчет нужен до закрытия экрана
+    private String diagnosticsSessionId;
+    // текст открытого окна с показателями обновляется вместе с индикатором
+    private TextView qualityDetails;
 
     private final Handler mHandler = new Handler();
     private final Runnable mTickExecutor =
@@ -137,6 +153,8 @@ public class RtpSessionActivity extends XmppActivity
                 @Override
                 public void run() {
                     updateCallDuration();
+                    callStageBar.render(findCallDiagnostics());
+                    updateQualityIndicator();
                     mHandler.postDelayed(mTickExecutor, CALL_DURATION_UPDATE_INTERVAL);
                 }
             };
@@ -180,6 +198,11 @@ public class RtpSessionActivity extends XmppActivity
         this.binding = DataBindingUtil.setContentView(this, R.layout.activity_rtp_session);
         this.binding.remoteVideo.setOnClickListener(this::onVideoScreenClick);
         this.binding.localVideo.setOnClickListener(this::onVideoScreenClick);
+        this.callStageBar = new CallStageBar(binding.callStages);
+        setUpQualityChart(binding.qualityMos, CallQualityMetric.MOS);
+        setUpQualityChart(binding.qualityRtt, CallQualityMetric.RTT);
+        setUpQualityChart(binding.qualityLossIn, CallQualityMetric.LOSS_IN);
+        this.binding.qualityCharts.setOnClickListener(v -> showQualityDetails());
         setSupportActionBar(binding.toolbar);
         Activities.setStatusAndNavigationBarColors(this, binding.getRoot());
     }
@@ -194,9 +217,11 @@ public class RtpSessionActivity extends XmppActivity
         final MenuItem help = menu.findItem(R.id.action_help);
         final MenuItem gotoChat = menu.findItem(R.id.action_goto_chat);
         final MenuItem switchToVideo = menu.findItem(R.id.action_switch_to_video);
+        final MenuItem callDiagnostics = menu.findItem(R.id.action_call_diagnostics);
         help.setVisible(Config.HELP != null && isHelpButtonVisible());
         gotoChat.setVisible(isSwitchToConversationVisible());
         switchToVideo.setVisible(isSwitchToVideoVisible());
+        callDiagnostics.setVisible(findCallDiagnostics() != null);
         return super.onCreateOptionsMenu(menu);
     }
 
@@ -261,6 +286,12 @@ public class RtpSessionActivity extends XmppActivity
             return true;
         } else if (itemItem == R.id.action_switch_to_video) {
             requestPermissionAndSwitchToVideo();
+            return true;
+        } else if (itemItem == R.id.action_call_diagnostics) {
+            final var account = extractAccount(getIntent());
+            if (account != null && diagnosticsSessionId != null) {
+                CallDiagnosticsActivity.launch(this, account, diagnosticsSessionId);
+            }
             return true;
         } else {
             return super.onOptionsItemSelected(item);
@@ -614,6 +645,7 @@ public class RtpSessionActivity extends XmppActivity
     @Override
     public void onStop() {
         mHandler.removeCallbacks(mTickExecutor);
+        callStageBar.release();
         mHandler.removeCallbacks(mVisibilityToggleExecutor);
         binding.remoteVideo.release();
         binding.remoteVideo.setOnAspectRatioChanged(null);
@@ -1224,6 +1256,138 @@ public class RtpSessionActivity extends XmppActivity
         setVisibleAndShow(this.binding.inCallActionLeft);
     }
 
+    // индикатор только для аудиозвонка: в видеозвонке место под длительностью занимает видео
+    private void updateQualityIndicator() {
+        final JingleRtpConnection connection =
+                this.rtpConnectionReference != null ? this.rtpConnectionReference.get() : null;
+        if (connection == null
+                || connection.getEndUserState() != RtpEndUserState.CONNECTED
+                || binding.duration.getVisibility() != View.VISIBLE) {
+            binding.qualityIndicator.setVisibility(View.GONE);
+            binding.qualityCharts.setVisibility(View.GONE);
+            return;
+        }
+        connection.keepLiveStats();
+        final var diagnostics = connection.getCallDiagnostics();
+        final var live = diagnostics.getLiveQuality();
+        final var rating = live == null ? null : CallQuality.rating(live.mos());
+        final int icon;
+        final int color;
+        if (rating == null) {
+            icon = R.drawable.cocosations_ic_signal_1_24dp;
+            color =
+                    MaterialColors.getColor(
+                            binding.qualityIndicator,
+                            com.google.android.material.R.attr.colorOutline);
+        } else {
+            icon =
+                    switch (rating) {
+                        case GOOD -> R.drawable.cocosations_ic_signal_3_24dp;
+                        case FAIR -> R.drawable.cocosations_ic_signal_2_24dp;
+                        case POOR -> R.drawable.cocosations_ic_signal_1_24dp;
+                    };
+            color =
+                    switch (rating) {
+                        case GOOD -> ContextCompat.getColor(this, R.color.cocosations_status_ok);
+                        case FAIR ->
+                                ContextCompat.getColor(this, R.color.cocosations_status_warning);
+                        case POOR ->
+                                MaterialColors.getColor(
+                                        binding.qualityIndicator,
+                                        androidx.appcompat.R.attr.colorError);
+                    };
+        }
+        binding.qualityIndicator.setChipIconResource(icon);
+        binding.qualityIndicator.setChipIconTint(ColorStateList.valueOf(color));
+        binding.qualityIndicator.setText(
+                rating == null
+                        ? getString(
+                                R.string.cocosations_call_quality_indicator,
+                                getString(R.string.cocosations_call_quality_live),
+                                getString(R.string.cocosations_call_quality_waiting))
+                        : getString(
+                                R.string.cocosations_call_quality_indicator,
+                                getString(CallReportFormat.rating(rating)),
+                                live.rttMillis() < 0
+                                        ? "-"
+                                        : "RTT "
+                                                + getString(
+                                                        R.string
+                                                                .cocosations_call_report_milliseconds,
+                                                        live.rttMillis())));
+        binding.qualityIndicator.setOnClickListener(v -> showQualityDetails());
+        binding.qualityIndicator.setVisibility(View.VISIBLE);
+        final var recent = diagnostics.getRecentQuality();
+        renderQualityChart(binding.qualityMos, CallQualityMetric.MOS, recent, live);
+        renderQualityChart(binding.qualityRtt, CallQualityMetric.RTT, recent, live);
+        renderQualityChart(binding.qualityLossIn, CallQualityMetric.LOSS_IN, recent, live);
+        binding.qualityCharts.setVisibility(View.VISIBLE);
+        final TextView details = this.qualityDetails;
+        if (details != null) {
+            details.setText(qualityDetails(live, diagnostics.getRoute()));
+        }
+    }
+
+    private static void setUpQualityChart(
+            final CocosationsQualityChartRowBinding row, final CallQualityMetric metric) {
+        row.label.setText(metric.label);
+        row.chart.setCompact(true);
+    }
+
+    // график за последнюю минуту, справа текущее значение; линия появляется со второй точки
+    private static void renderQualityChart(
+            final CocosationsQualityChartRowBinding row,
+            final CallQualityMetric metric,
+            final List<CallQuality.Sample> recent,
+            @Nullable final CallQuality.Sample live) {
+        final double value = live == null ? -1 : metric.value.applyAsDouble(live);
+        row.value.setText(value < 0 ? "-" : metric.format(value));
+        row.chart.setData(recent, metric);
+    }
+
+    private void showQualityDetails() {
+        final JingleRtpConnection connection =
+                this.rtpConnectionReference != null ? this.rtpConnectionReference.get() : null;
+        if (connection == null) {
+            return;
+        }
+        final var diagnostics = connection.getCallDiagnostics();
+        final TextView details = new TextView(this);
+        final int padding = Math.round(24 * getResources().getDisplayMetrics().density);
+        details.setPadding(padding, padding / 2, padding, 0);
+        details.setLineSpacing(0, 1.2f);
+        details.setText(qualityDetails(diagnostics.getLiveQuality(), diagnostics.getRoute()));
+        this.qualityDetails = details;
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.cocosations_call_quality_live)
+                .setView(details)
+                .setPositiveButton(R.string.ok, null)
+                .setOnDismissListener(dialog -> this.qualityDetails = null)
+                .show();
+    }
+
+    private String qualityDetails(
+            @Nullable final CallQuality.Sample live, @Nullable final CallDiagnostics.Route route) {
+        final var builder = new StringBuilder();
+        if (route != null) {
+            builder.append(getString(R.string.cocosations_call_report_route))
+                    .append(": ")
+                    .append(CallStageBar.route(this, route));
+        }
+        if (live == null) {
+            builder.append('\n').append(getString(R.string.cocosations_call_quality_waiting));
+            return builder.toString().trim();
+        }
+        for (final var metric : CallQualityMetric.values()) {
+            final double value = metric.value.applyAsDouble(live);
+            builder.append('\n')
+                    .append(getString(metric.label))
+                    .append(": ")
+                    .append(value < 0 ? "-" : metric.format(value));
+        }
+        return builder.toString().trim();
+    }
+
     private void updateCallDuration() {
         final JingleRtpConnection connection =
                 this.rtpConnectionReference != null ? this.rtpConnectionReference.get() : null;
@@ -1630,6 +1794,32 @@ public class RtpSessionActivity extends XmppActivity
                 EXTRA_LAST_ACTION,
                 media.contains(Media.VIDEO) ? ACTION_MAKE_VIDEO_CALL : ACTION_MAKE_VOICE_CALL);
         setIntent(intent);
+    }
+
+    @Nullable
+    private CallDiagnostics findCallDiagnostics() {
+        if (xmppConnectionService == null) {
+            return null;
+        }
+        final Intent intent = getIntent();
+        final var account = intent == null ? null : extractAccount(intent);
+        if (account == null) {
+            return null;
+        }
+        final JingleRtpConnection connection =
+                this.rtpConnectionReference != null ? this.rtpConnectionReference.get() : null;
+        if (connection != null) {
+            this.diagnosticsSessionId = connection.getId().sessionId;
+            return connection.getCallDiagnostics();
+        }
+        try {
+            this.diagnosticsSessionId = requireOngoingRtpSession().getSessionId();
+        } catch (final IllegalStateException e) {
+            // предложение звонка уже снято; показываем последний известный отчет
+        }
+        return account.getXmppConnection()
+                .getManager(JingleManager.class)
+                .getCallDiagnostics(diagnosticsSessionId);
     }
 
     private static boolean emptyReference(final WeakReference<?> weakReference) {

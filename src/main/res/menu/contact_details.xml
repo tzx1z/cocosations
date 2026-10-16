@@ -37,6 +37,12 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_last_call_report"
+        android:orderInCategory="70"
+        android:title="@string/cocosations_last_call_report"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_block"
         android:orderInCategory="72"
         android:title="@string/action_block_contact"

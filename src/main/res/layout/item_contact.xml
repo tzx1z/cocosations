@@ -18,20 +18,43 @@
             app:shapeAppearanceOverlay="@style/ShapeAppearance.RoundedCornersLight" />
 
         <LinearLayout
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_centerVertical="true"
             android:layout_marginStart="@dimen/avatar_item_distance"
             android:layout_toEndOf="@+id/contact_photo"
             android:orientation="vertical">
 
-            <TextView
-                android:id="@+id/contact_display_name"
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:singleLine="true"
-                android:textAppearance="?textAppearanceBodyLarge"
-                tools:text="Juliet Capulet" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/contact_display_name"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:singleLine="true"
+                    android:textAppearance="?textAppearanceBodyLarge"
+                    tools:text="Juliet Capulet" />
+
+                <TextView
+                    android:id="@+id/contact_last_seen"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    app:drawableStartCompat="@drawable/cocosations_presence_dot"
+                    android:drawablePadding="4dp"
+                    android:gravity="center_vertical"
+                    android:singleLine="true"
+                    android:textAppearance="?textAppearanceLabelMedium"
+                    android:textColor="?colorOnSurfaceVariant"
+                    android:visibility="gone"
+                    tools:text="2 h ago"
+                    tools:visibility="visible" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/contact_jid"

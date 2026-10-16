@@ -68,6 +68,8 @@ public class CallIntegration extends Connection {
     private final AtomicBoolean initialAudioDeviceConfigured = new AtomicBoolean(false);
     private final AtomicBoolean delayedDestructionInitiated = new AtomicBoolean(false);
     private final AtomicBoolean isDestroyed = new AtomicBoolean(false);
+    // после восстановления связи звучит свой сигнал, тон ответа - только в начале разговора
+    private final AtomicBoolean answerTonePlayed = new AtomicBoolean(false);
 
     private List<CallEndpoint> availableEndpoints = Collections.emptyList();
     private boolean isMicrophoneEnabled = true;
@@ -90,6 +92,26 @@ public class CallIntegration extends Connection {
         }
         setRingbackRequested(true);
         setConnectionCapabilities(CAPABILITY_MUTE | CAPABILITY_RESPOND_VIA_TEXT);
+    }
+
+    /**
+     * managed - входящий аудиозвонок идет через учетную запись звонков системы: его показывает
+     * приложение «Телефон», а команды часов, гарнитур и машины Telecom выполняет. Для self-managed
+     * звонков сторонних приложений Telecom эти команды отбрасывает.
+     */
+    @RequiresApi(api = Build.VERSION_CODES.O)
+    public void setManaged(final boolean managed) {
+        if (managed) {
+            setConnectionProperties(getConnectionProperties() & ~PROPERTY_SELF_MANAGED);
+            // без этого Telecom ведет звук как у звонка оператора (MODE_IN_CALL)
+            setAudioModeIsVoip(true);
+            // ответ сообщением система отправила бы как SMS на адрес xmpp:
+            setConnectionCapabilities(CAPABILITY_MUTE);
+        } else {
+            setConnectionProperties(getConnectionProperties() | PROPERTY_SELF_MANAGED);
+            setAudioModeIsVoip(false);
+            setConnectionCapabilities(CAPABILITY_MUTE | CAPABILITY_RESPOND_VIA_TEXT);
+        }
     }
 
     public void setCallback(final Callback callback) {
@@ -372,13 +394,25 @@ public class CallIntegration extends Connection {
             }
         }
         if (state == STATE_ACTIVE) {
-            startTone(DEFAULT_TONE_VOLUME, ToneGenerator.TONE_CDMA_ANSWER, 100);
+            if (answerTonePlayed.compareAndSet(false, true)) {
+                startTone(DEFAULT_TONE_VOLUME, ToneGenerator.TONE_CDMA_ANSWER, 100);
+            }
         } else if (state == STATE_DISCONNECTED) {
             final var audioManager = this.appRTCAudioManager;
             if (audioManager != null) {
                 audioManager.executeOnMain(audioManager::stop);
             }
         }
+    }
+
+    public void connectivityLost() {
+        Log.d(Config.LOGTAG, "CallIntegration.connectivityLost()");
+        CallTones.play(CallTones.Tone.CONNECTIVITY_LOST);
+    }
+
+    public void connectivityRestored() {
+        Log.d(Config.LOGTAG, "CallIntegration.connectivityRestored()");
+        CallTones.play(CallTones.Tone.CONNECTIVITY_RESTORED);
     }
 
     public void success() {

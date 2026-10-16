@@ -65,13 +65,37 @@
                             android:text="@string/account_settings_example_jabber_id"
                             android:textAppearance="?textAppearanceTitleLarge" />
 
+                        <TextView
+                            android:id="@+id/details_last_seen"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_below="@+id/details_contact_xmpp_address"
+                            android:layout_centerHorizontal="true"
+                            android:layout_marginTop="8dp"
+                            android:gravity="center_horizontal"
+                            android:textAppearance="?textAppearanceBodyMedium"
+                            android:textColor="?colorOnSurfaceVariant"
+                            android:visibility="gone" />
 
+                        <TextView
+                            android:id="@+id/details_last_seen_source"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_below="@+id/details_last_seen"
+                            android:layout_centerHorizontal="true"
+                            android:layout_marginHorizontal="16dp"
+                            android:layout_marginTop="4dp"
+                            android:gravity="center_horizontal"
+                            android:textAppearance="?textAppearanceBodySmall"
+                            android:textColor="?colorOnSurfaceVariant"
+                            android:textIsSelectable="true"
+                            android:visibility="gone" />
 
                         <LinearLayout
                             android:id="@+id/button_box"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_below="@+id/details_contact_xmpp_address"
+                            android:layout_below="@+id/details_last_seen_source"
                             android:layout_centerHorizontal="true"
                             android:layout_marginTop="16dp"
                             android:orientation="horizontal">

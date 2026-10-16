@@ -1,6 +1,7 @@
 package eu.siacs.conversations.xmpp.jingle;
 
 import android.content.Intent;
+import android.os.SystemClock;
 import android.telecom.TelecomManager;
 import android.telecom.VideoProfile;
 import android.util.Log;
@@ -42,10 +43,12 @@ import eu.siacs.conversations.xmpp.jingle.stanzas.Content;
 import eu.siacs.conversations.xmpp.jingle.stanzas.Group;
 import eu.siacs.conversations.xmpp.jingle.stanzas.IceUdpTransportInfo;
 import eu.siacs.conversations.xmpp.jingle.stanzas.RtpDescription;
+import eu.siacs.conversations.xmpp.manager.DiscoManager;
 import eu.siacs.conversations.xmpp.manager.ExternalServiceDiscoveryManager;
 import eu.siacs.conversations.xmpp.manager.JingleManager;
 import eu.siacs.conversations.xmpp.manager.JingleMessageManager;
 import im.conversations.android.xmpp.IqErrorException;
+import im.conversations.android.xmpp.model.disco.external.Services;
 import im.conversations.android.xmpp.model.error.Condition;
 import im.conversations.android.xmpp.model.jingle.Jingle;
 import im.conversations.android.xmpp.model.jingle.Reason;
@@ -57,9 +60,14 @@ import im.conversations.android.xmpp.model.jmi.Propose;
 import im.conversations.android.xmpp.model.jmi.Reject;
 import im.conversations.android.xmpp.model.jmi.Retract;
 import im.conversations.android.xmpp.model.stanza.Iq;
+import im.conversations.android.xmpp.model.version.Name;
+import im.conversations.android.xmpp.model.version.Os;
+import im.conversations.android.xmpp.model.version.Version;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -71,7 +79,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.webrtc.EglBase;
 import org.webrtc.IceCandidate;
+import org.webrtc.IceCandidateErrorEvent;
 import org.webrtc.PeerConnection;
+import org.webrtc.RTCStatsReport;
 import org.webrtc.VideoTrack;
 
 public class JingleRtpConnection extends AbstractJingleConnection
@@ -85,6 +95,12 @@ public class JingleRtpConnection extends AbstractJingleConnection
                     State.SESSION_INITIALIZED_PRE_APPROVED,
                     State.SESSION_ACCEPTED);
     private static final long BUSY_TIME_OUT = 30;
+    private static final long STATS_INTERVAL_SECONDS = 5;
+    private static final long LIVE_STATS_INTERVAL_MILLIS = 1000;
+    // экран звонка продлевает аренду на каждом тике; после закрытия экрана опрос затихает сам
+    private static final long LIVE_STATS_LEASE_MILLIS = 3000;
+    // сигнал разрыва звучит через STALL_MILLIS плюс не больше одного интервала опроса
+    private static final long INCOMING_AUDIO_POLL_MILLIS = 250;
 
     private final WebRTCWrapper webRTCWrapper = new WebRTCWrapper(this);
     private final Queue<
@@ -93,6 +109,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
     private final OmemoVerification omemoVerification = new OmemoVerification();
     private final CallIntegration callIntegration;
     private final Message message;
+    private final CallDiagnostics diagnostics;
 
     private Set<Media> proposedMedia;
     private RtpContentMap initiatorRtpContentMap;
@@ -102,7 +119,18 @@ public class JingleRtpConnection extends AbstractJingleConnection
     private IceUdpTransportInfo.Setup peerDtlsSetup;
     private final Stopwatch sessionDuration = Stopwatch.createUnstarted();
     private final Queue<PeerConnection.PeerConnectionState> stateHistory = new LinkedList<>();
+    // прозвучал сигнал разрыва, ждем возобновления входящего звука или CONNECTED. Меняется только
+    // на signaling-потоке: там приходят и onConnectionChange(), и отчеты getStats()
+    private boolean connectivityLost = false;
+    private final IncomingAudioWatch incomingAudio = new IncomingAudioWatch();
     private ScheduledFuture<?> ringingTimeoutFuture;
+    // отдельная блокировка: keepLiveStats() вызывается из UI-потока, а монитор соединения бывает
+    // занят долгими операциями
+    private final Object statsLock = new Object();
+    private ScheduledFuture<?> statsFuture;
+    private ScheduledFuture<?> liveStatsFuture;
+    private ScheduledFuture<?> incomingAudioFuture;
+    private volatile long liveStatsUntil;
 
     public JingleRtpConnection(
             final XmppConnectionService service, final Id id, final Jid initiator) {
@@ -121,6 +149,22 @@ public class JingleRtpConnection extends AbstractJingleConnection
             final Jid initiator,
             final CallIntegration callIntegration) {
         super(service, id, initiator);
+        // для исходящего JMI-звонка отчет создан еще на этапе propose и находится по session id
+        this.diagnostics =
+                id.account
+                        .getXmppConnection()
+                        .getManager(JingleManager.class)
+                        .getOrCreateCallDiagnostics(
+                                id,
+                                isInitiator()
+                                        ? CallDiagnostics.Direction.OUTGOING
+                                        : CallDiagnostics.Direction.INCOMING);
+        if (isResponder()) {
+            // входящий звонок дошел до нас, значит свой сервер и федерация работают
+            this.diagnostics.confirmFederation(CallDiagnostics.FederationEvidence.INCOMING_CALL);
+            this.diagnostics.advance(CallStage.WAITING_FOR_PEER);
+        }
+        recordPeer();
         final Conversation conversation =
                 service.findOrCreateConversation(id.account, id.with.asBareJid(), false, false);
         this.message =
@@ -162,6 +206,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
         if (isTerminated()) {
             return;
         }
+        diagnostics.fail(CallDiagnostics.Reason.SERVER_CONNECTION_LOST, null);
         webRTCWrapper.close();
         if (isResponder() && isInState(State.PROPOSED, State.SESSION_INITIALIZED)) {
             xmppConnectionService.getNotificationService().cancelIncomingCallNotification();
@@ -202,6 +247,17 @@ public class JingleRtpConnection extends AbstractJingleConnection
             return;
         }
         webRTCWrapper.close();
+        final String condition = wrapper.reason() == null ? "none" : wrapper.reason().getName();
+        diagnostics.event(
+                CallDiagnostics.EventType.SESSION_TERMINATE_RECEIVED,
+                withText(condition, wrapper.text()));
+        diagnostics.setEndReason(condition, wrapper.text(), true);
+        // callee не ответил до своего таймаута: со стороны звонящего это недоставленный вызов
+        if (isInitiator()
+                && wrapper.reason() instanceof Reason.Timeout
+                && diagnostics.getStage().compareTo(CallStage.ICE_NEGOTIATION) < 0) {
+            diagnostics.fail(CallDiagnostics.Reason.PEER_NOT_RESPONDING, "timeout");
+        }
         final State target = reasonToState(wrapper.reason());
         transitionOrThrow(target);
         if ((previous == State.PROPOSED || previous == State.SESSION_INITIALIZED)
@@ -1062,6 +1118,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
             }
             final IceCandidate iceCandidate = new IceCandidate(sdpMid, mLineIndex, sdp);
             Log.d(Config.LOGTAG, "received candidate: " + iceCandidate);
+            recordRemoteCandidate(candidate);
             this.webRTCWrapper.addIceCandidate(iceCandidate);
         }
     }
@@ -1194,6 +1251,9 @@ public class JingleRtpConnection extends AbstractJingleConnection
         }
         if (transition(target, () -> this.initiatorRtpContentMap = contentMap)) {
             respondOk(jinglePacket);
+            diagnostics.event(
+                    CallDiagnostics.EventType.SESSION_INITIATE_RECEIVED, id.with.toString());
+            recordRemoteCandidates(contentMap);
             pendingIceCandidates.addAll(contentMap.contents.entrySet());
             if (target == State.SESSION_INITIALIZED_PRE_APPROVED) {
                 Log.d(
@@ -1278,6 +1338,11 @@ public class JingleRtpConnection extends AbstractJingleConnection
                 "processing session-accept with " + contentMap.contents.size() + " contents");
         if (transition(State.SESSION_ACCEPTED)) {
             respondOk(jinglePacket);
+            diagnostics.event(
+                    CallDiagnostics.EventType.SESSION_ACCEPT_RECEIVED, id.with.toString());
+            diagnostics.advance(CallStage.ICE_NEGOTIATION);
+            startStatsCollection();
+            recordRemoteCandidates(contentMap);
             receiveSessionAccept(contentMap);
         } else {
             Log.d(
@@ -1466,6 +1531,9 @@ public class JingleRtpConnection extends AbstractJingleConnection
             return;
         }
         transitionOrThrow(State.SESSION_ACCEPTED);
+        diagnostics.event(CallDiagnostics.EventType.SESSION_ACCEPT_SENT, id.with.toString());
+        diagnostics.advance(CallStage.ICE_NEGOTIATION);
+        startStatsCollection();
         final Iq sessionAccept =
                 rtpContentMap.toJinglePacket(Jingle.Action.SESSION_ACCEPT, id.sessionId);
         send(sessionAccept);
@@ -1504,6 +1572,20 @@ public class JingleRtpConnection extends AbstractJingleConnection
                 id.account.getJid().asBareJid()
                         + ": delivered message to JingleRtpConnection "
                         + message);
+        // до обработки: отказ или отмена завершают отчет
+        switch (message) {
+            case Propose ignored ->
+                    diagnostics.event(CallDiagnostics.EventType.PROPOSE_RECEIVED, from.toString());
+            case Retract ignored -> {
+                diagnostics.event(CallDiagnostics.EventType.RETRACT_RECEIVED, from.toString());
+                diagnostics.setEndReason("retract", null, true);
+            }
+            case Reject ignored -> {
+                diagnostics.event(CallDiagnostics.EventType.REJECT_RECEIVED, from.toString());
+                diagnostics.setEndReason("reject", null, true);
+            }
+            default -> {}
+        }
         switch (message) {
             case Propose p -> receivePropose(from, p, serverMessageId, timestamp);
             case Proceed p -> receiveProceed(from, p, serverMessageId, timestamp);
@@ -1516,13 +1598,15 @@ public class JingleRtpConnection extends AbstractJingleConnection
         }
     }
 
-    public void deliverFailedProceed(final String message) {
+    public void deliverFailedProceed(final String message, final String errorCondition) {
         Log.d(
                 Config.LOGTAG,
                 id.account.getJid().asBareJid()
                         + ": receive message error for proceed message ("
                         + Strings.nullToEmpty(message)
                         + ")");
+        diagnostics.event(CallDiagnostics.EventType.PROCEED_BOUNCED, errorCondition);
+        diagnostics.failWithCondition(errorCondition);
         if (transition(State.TERMINATED_CONNECTIVITY_ERROR)) {
             webRTCWrapper.close();
             Log.d(
@@ -1739,6 +1823,10 @@ public class JingleRtpConnection extends AbstractJingleConnection
         if (from.equals(id.with)) {
             if (isInitiator()) {
                 if (transition(State.PROCEED)) {
+                    diagnostics.event(CallDiagnostics.EventType.PROCEED_RECEIVED, from.toString());
+                    diagnostics.setAccepted();
+                    diagnostics.confirmFederation(CallDiagnostics.FederationEvidence.PROCEED);
+                    diagnostics.advance(CallStage.WAITING_FOR_PEER);
                     if (serverMsgId != null) {
                         this.message.setServerMsgId(serverMsgId);
                     }
@@ -1831,6 +1919,11 @@ public class JingleRtpConnection extends AbstractJingleConnection
     }
 
     public void sendSessionInitiate() {
+        // без JMI session-initiate идет на full JID, который известен только из presence
+        diagnostics.confirmFederation(CallDiagnostics.FederationEvidence.PRESENCE);
+        if (id.account.isOnlineAndConnected()) {
+            diagnostics.advance(CallStage.RESOLVING_REMOTE_SERVER);
+        }
         sendSessionInitiate(this.proposedMedia, State.SESSION_INITIALIZED);
     }
 
@@ -1951,6 +2044,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
             return;
         }
         this.transitionOrThrow(targetState);
+        diagnostics.event(CallDiagnostics.EventType.SESSION_INITIATE_SENT, id.with.toString());
         final Iq sessionInitiate =
                 rtpContentMap.toJinglePacket(Jingle.Action.SESSION_INITIATE, id.sessionId);
         send(sessionInitiate);
@@ -2002,6 +2096,10 @@ public class JingleRtpConnection extends AbstractJingleConnection
     }
 
     protected void sendSessionTerminate(final Reason reason, final String text) {
+        // переход в конечное состояние закрывает отчет, поэтому причина пишется до отправки
+        diagnostics.event(
+                CallDiagnostics.EventType.SESSION_TERMINATE_SENT, withText(reason.getName(), text));
+        diagnostics.setEndReason(reason.getName(), text, false);
         sendSessionTerminate(reason, text, this::writeLogMessage);
         id.account
                 .getXmppConnection()
@@ -2222,6 +2320,8 @@ public class JingleRtpConnection extends AbstractJingleConnection
     }
 
     public synchronized void acceptCall() {
+        diagnostics.setAccepted();
+        diagnostics.event(CallDiagnostics.EventType.ACCEPTED_LOCALLY);
         switch (this.state) {
             case PROPOSED -> {
                 cancelRingingTimeout();
@@ -2256,6 +2356,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
                             + " nothing to do");
             return;
         }
+        diagnostics.setLocalHangup();
         switch (this.state) {
             case PROPOSED -> rejectCallFromProposed();
             case SESSION_INITIALIZED -> rejectCallFromSessionInitiate();
@@ -2290,6 +2391,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
                             + " nothing to do");
             return;
         }
+        diagnostics.setLocalHangup();
         if (isInState(State.PROPOSED) && isResponder()) {
             rejectCallFromProposed();
             return;
@@ -2358,6 +2460,8 @@ public class JingleRtpConnection extends AbstractJingleConnection
                 .ensureConnectionIsRegistered(this);
         this.webRTCWrapper.setup(this.xmppConnectionService);
         final var appSettings = new AppSettings(xmppConnectionService.getApplicationContext());
+        recordIceServers(iceServers, appSettings.isUseRelays());
+        diagnostics.setMedia(media);
         this.webRTCWrapper.initializePeerConnection(
                 media, iceServers, trickle, appSettings.isUseRelays());
         // this.webRTCWrapper.setMicrophoneEnabledOrThrow(callIntegration.isMicrophoneEnabled());
@@ -2424,6 +2528,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
     @Override
     protected synchronized boolean transition(final State target, final Runnable runnable) {
         if (super.transition(target, runnable)) {
+            recordTransition(target);
             updateEndUserState();
             updateOngoingCallNotification();
             return true;
@@ -2460,7 +2565,9 @@ public class JingleRtpConnection extends AbstractJingleConnection
                 Config.LOGTAG,
                 id.account.getJid().asBareJid() + ": PeerConnectionState changed to " + newState);
         this.stateHistory.add(newState);
+        diagnostics.setPeerConnectionState(newState.name());
         if (newState == PeerConnection.PeerConnectionState.CONNECTED) {
+            diagnostics.advance(CallStage.CONNECTED);
             this.sessionDuration.start();
             updateOngoingCallNotification();
         } else if (this.sessionDuration.isRunning()) {
@@ -2471,8 +2578,26 @@ public class JingleRtpConnection extends AbstractJingleConnection
         final boolean neverConnected =
                 !this.stateHistory.contains(PeerConnection.PeerConnectionState.CONNECTED);
 
+        // собеседник может молча слушать: о разрыве и восстановлении говорящий узнает по сигналу.
+        // Входящий звук пропадает раньше, чем ICE объявит DISCONNECTED, поэтому обычно сигналы
+        // идут из onIncomingAudioStats(), а здесь остается запасной путь
+        if (newState == PeerConnection.PeerConnectionState.CONNECTED) {
+            if (this.connectivityLost && !this.incomingAudio.isStalled()) {
+                this.connectivityLost = false;
+                this.callIntegration.connectivityRestored();
+            }
+        } else if ((newState == PeerConnection.PeerConnectionState.DISCONNECTED
+                        || newState == PeerConnection.PeerConnectionState.FAILED)
+                && !neverConnected
+                && !this.connectivityLost
+                && this.state == State.SESSION_ACCEPTED) {
+            this.connectivityLost = true;
+            this.callIntegration.connectivityLost();
+        }
+
         if (newState == PeerConnection.PeerConnectionState.FAILED) {
             if (neverConnected) {
+                diagnostics.fail(CallDiagnostics.Reason.ICE_FAILED, null);
                 if (isTerminated()) {
                     Log.d(
                             Config.LOGTAG,
@@ -2485,10 +2610,324 @@ public class JingleRtpConnection extends AbstractJingleConnection
                 webRTCWrapper.execute(this::closeWebRTCSessionAfterFailedConnection);
                 return;
             } else {
+                diagnostics.event(CallDiagnostics.EventType.ICE_RESTART);
                 this.restartIce();
             }
         }
         updateEndUserState();
+    }
+
+    @Override
+    public void onIceConnectionChange(final PeerConnection.IceConnectionState newState) {
+        diagnostics.setIceConnectionState(newState.name());
+        // при FAILED это последняя возможность увидеть, какие пары не прошли проверки
+        requestStats();
+    }
+
+    @Override
+    public void onIceGatheringChange(final PeerConnection.IceGatheringState newState) {
+        diagnostics.setIceGatheringState(newState.name());
+    }
+
+    @Override
+    public void onLocalIceCandidateGathered(final IceCandidate iceCandidate) {
+        diagnostics.addLocalCandidate(iceCandidate.sdp, iceCandidate.serverUrl);
+    }
+
+    @Override
+    public void onSelectedCandidatePairChanged(
+            final IceCandidate local, final IceCandidate remote) {
+        diagnostics.setSelectedCandidatePair(local.sdp, remote.sdp);
+        requestStats();
+    }
+
+    private void startStatsCollection() {
+        synchronized (statsLock) {
+            if (statsFuture == null && !isTerminated()) {
+                statsFuture =
+                        JingleManager.SCHEDULED_EXECUTOR_SERVICE.scheduleWithFixedDelay(
+                                () -> collectStats(true),
+                                STATS_INTERVAL_SECONDS,
+                                STATS_INTERVAL_SECONDS,
+                                TimeUnit.SECONDS);
+                incomingAudioFuture =
+                        JingleManager.SCHEDULED_EXECUTOR_SERVICE.scheduleWithFixedDelay(
+                                () ->
+                                        webRTCWrapper.collectIncomingAudioStats(
+                                                this::onIncomingAudioStats),
+                                INCOMING_AUDIO_POLL_MILLIS,
+                                INCOMING_AUDIO_POLL_MILLIS,
+                                TimeUnit.MILLISECONDS);
+            }
+        }
+    }
+
+    private void stopStatsCollection() {
+        synchronized (statsLock) {
+            if (statsFuture != null) {
+                statsFuture.cancel(false);
+                statsFuture = null;
+            }
+            if (incomingAudioFuture != null) {
+                incomingAudioFuture.cancel(false);
+                incomingAudioFuture = null;
+            }
+            stopLiveStats();
+        }
+    }
+
+    /** Ежесекундный опрос getStats() для индикатора качества, пока открыт экран звонка. */
+    public void keepLiveStats() {
+        this.liveStatsUntil = SystemClock.elapsedRealtime() + LIVE_STATS_LEASE_MILLIS;
+        synchronized (statsLock) {
+            if (liveStatsFuture == null && statsFuture != null) {
+                liveStatsFuture =
+                        JingleManager.SCHEDULED_EXECUTOR_SERVICE.scheduleWithFixedDelay(
+                                this::collectLiveStats,
+                                LIVE_STATS_INTERVAL_MILLIS,
+                                LIVE_STATS_INTERVAL_MILLIS,
+                                TimeUnit.MILLISECONDS);
+            }
+        }
+    }
+
+    private void collectLiveStats() {
+        if (SystemClock.elapsedRealtime() > liveStatsUntil) {
+            synchronized (statsLock) {
+                stopLiveStats();
+            }
+            return;
+        }
+        collectStats(false);
+    }
+
+    private void stopLiveStats() {
+        if (liveStatsFuture != null) {
+            liveStatsFuture.cancel(false);
+            liveStatsFuture = null;
+        }
+    }
+
+    // коллбэки WebRTC приходят на signaling-потоке, а getStats() вызывается под блокировкой
+    // WebRTCWrapper; close() держит ее и ждет этот же поток, поэтому сбор уходит на планировщик
+    private void requestStats() {
+        JingleManager.SCHEDULED_EXECUTOR_SERVICE.execute(() -> collectStats(false));
+    }
+
+    private void collectStats(final boolean record) {
+        webRTCWrapper.collectStats(report -> diagnostics.onStats(asMap(report), record));
+    }
+
+    private void onIncomingAudioStats(final RTCStatsReport report) {
+        final long packets = CallQuality.Counters.parse(asMap(report)).packetsReceived();
+        switch (incomingAudio.update(packets, SystemClock.elapsedRealtime())) {
+            case STOPPED -> {
+                if (!this.connectivityLost && this.state == State.SESSION_ACCEPTED) {
+                    this.connectivityLost = true;
+                    this.callIntegration.connectivityLost();
+                }
+            }
+            case RESUMED -> {
+                if (this.connectivityLost) {
+                    this.connectivityLost = false;
+                    this.callIntegration.connectivityRestored();
+                }
+            }
+            case NONE -> {}
+        }
+    }
+
+    static Map<String, Map<String, Object>> asMap(final RTCStatsReport report) {
+        final Map<String, Map<String, Object>> stats = new HashMap<>();
+        for (final var entry : report.getStatsMap().entrySet()) {
+            final Map<String, Object> members = new HashMap<>(entry.getValue().getMembers());
+            members.put("type", entry.getValue().getType());
+            stats.put(entry.getKey(), members);
+        }
+        return stats;
+    }
+
+    @Override
+    protected void handleIqErrorResponse(final Throwable throwable) {
+        if (!isTerminated()) {
+            if (throwable instanceof IqErrorException iqErrorException) {
+                final var condition = iqErrorException.getErrorCondition();
+                final var name = condition == null ? null : condition.getName();
+                diagnostics.event(CallDiagnostics.EventType.IQ_ERROR, name);
+                diagnostics.failWithCondition(name);
+            } else {
+                diagnostics.fail(CallDiagnostics.Reason.STANZA_ERROR, null);
+            }
+        }
+        super.handleIqErrorResponse(throwable);
+    }
+
+    @Override
+    protected void handleIqTimeoutResponse() {
+        if (!isTerminated()) {
+            diagnostics.event(CallDiagnostics.EventType.IQ_TIMEOUT);
+            diagnostics.fail(CallDiagnostics.Reason.PEER_NOT_RESPONDING, "timeout");
+        }
+        super.handleIqTimeoutResponse();
+    }
+
+    // время ответа собеседника на session-initiate и session-accept показывает задержку сигналинга
+    @Override
+    protected void onIqResult(final Iq request) {
+        final var jingle = request.getExtension(Jingle.class);
+        final var action = jingle == null ? null : jingle.getAction();
+        if (action == Jingle.Action.SESSION_INITIATE || action == Jingle.Action.SESSION_ACCEPT) {
+            diagnostics.event(CallDiagnostics.EventType.IQ_RESULT, action.toString());
+        }
+    }
+
+    @Override
+    public void onIceCandidateError(final IceCandidateErrorEvent event) {
+        diagnostics.addIceCandidateError(event.url, event.errorCode, event.errorText);
+    }
+
+    private static String withText(final String condition, @Nullable final String text) {
+        return Strings.isNullOrEmpty(text) ? condition : condition + " (" + text + ")";
+    }
+
+    private void recordPeer() {
+        final var connection = id.account.getXmppConnection();
+        final var info = connection.getManager(DiscoManager.class).get(id.with);
+        final List<String> features = new ArrayList<>();
+        String identityName = null;
+        String identityType = null;
+        if (info != null) {
+            for (final String feature : CallDiagnostics.PEER_FEATURES) {
+                if (info.hasFeature(feature)) {
+                    features.add(feature);
+                }
+            }
+            for (final var identity : info.getIdentities()) {
+                if ("client".equals(identity.getCategory())) {
+                    identityName = identity.getIdentityName();
+                    identityType = identity.getType();
+                    break;
+                }
+            }
+        }
+        diagnostics.setPeer(
+                new CallDiagnostics.Peer(
+                        id.with.toString(),
+                        info != null,
+                        identityName,
+                        identityType,
+                        features,
+                        null,
+                        null,
+                        null,
+                        null));
+        final var request =
+                new Iq(
+                        Iq.Type.GET,
+                        id.with,
+                        new im.conversations.android.xmpp.model.version.Query());
+        Futures.addCallback(
+                connection.sendIqPacket(request),
+                new FutureCallback<>() {
+                    @Override
+                    public void onSuccess(final Iq result) {
+                        final var query =
+                                result.getExtension(
+                                        im.conversations.android.xmpp.model.version.Query.class);
+                        if (query == null) {
+                            diagnostics.setPeerSoftware(null, null, null, "empty");
+                            return;
+                        }
+                        diagnostics.setPeerSoftware(
+                                contentOf(query.getExtension(Name.class)),
+                                contentOf(query.getExtension(Version.class)),
+                                contentOf(query.getExtension(Os.class)),
+                                null);
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull final Throwable throwable) {
+                        diagnostics.setPeerSoftware(
+                                null, null, null, CallDiagnostics.errorName(throwable));
+                    }
+                },
+                MoreExecutors.directExecutor());
+    }
+
+    @Nullable
+    private static String contentOf(@Nullable final Element element) {
+        return element == null ? null : Strings.emptyToNull(element.getContent());
+    }
+
+    public CallDiagnostics getCallDiagnostics() {
+        return this.diagnostics;
+    }
+
+    // уточненные причины фиксируются раньше в месте ошибки; здесь только запасной вариант
+    private void recordTransition(final State target) {
+        switch (target) {
+            case REJECTED, REJECTED_RACED, TERMINATED_DECLINED_OR_BUSY -> {
+                if (isInitiator()) {
+                    diagnostics.fail(CallDiagnostics.Reason.DECLINED, null);
+                }
+            }
+            case TERMINATED_CONNECTIVITY_ERROR -> {
+                final var stage = diagnostics.getStage();
+                if (stage == CallStage.CONNECTED) {
+                    diagnostics.fail(CallDiagnostics.Reason.CONNECTION_LOST, null);
+                } else if (stage == CallStage.ICE_NEGOTIATION) {
+                    diagnostics.fail(CallDiagnostics.Reason.ICE_FAILED, null);
+                } else {
+                    diagnostics.fail(CallDiagnostics.Reason.PEER_NOT_RESPONDING, null);
+                }
+            }
+            case TERMINATED_APPLICATION_FAILURE ->
+                    diagnostics.fail(CallDiagnostics.Reason.APPLICATION_ERROR, null);
+            case TERMINATED_SECURITY_ERROR ->
+                    diagnostics.fail(CallDiagnostics.Reason.SECURITY_ERROR, null);
+            default -> {}
+        }
+        if (TERMINATED.contains(target)) {
+            diagnostics.end();
+        }
+    }
+
+    private void recordRemoteCandidates(final RtpContentMap contentMap) {
+        for (final var content : contentMap.contents.values()) {
+            for (final var candidate : content.transport.getCandidates()) {
+                recordRemoteCandidate(candidate);
+            }
+        }
+    }
+
+    private void recordRemoteCandidate(final IceUdpTransportInfo.Candidate candidate) {
+        final String address = candidate.getIp();
+        final String type = candidate.getType();
+        if (address == null || type == null) {
+            return;
+        }
+        diagnostics.addRemoteCandidate(
+                new CallDiagnostics.Candidate(
+                        type,
+                        Strings.nullToEmpty(candidate.getProtocol()),
+                        address,
+                        candidate.getPort(),
+                        candidate.getRelAddr(),
+                        candidate.getRelAddr() == null ? -1 : candidate.getRelPort(),
+                        null));
+    }
+
+    private void recordIceServers(
+            final Collection<PeerConnection.IceServer> iceServers, final boolean forceRelay) {
+        final List<String> urls = new ArrayList<>();
+        for (final var iceServer : iceServers) {
+            for (final String url : iceServer.urls) {
+                if (url != null) {
+                    urls.add(url);
+                }
+            }
+        }
+        diagnostics.setIceServers(urls, forceRelay);
     }
 
     private void restartIce() {
@@ -2674,6 +3113,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
         setLocalContentMap(activeContents);
         this.callIntegration.setAudioDeviceWhenAvailable(
                 CallIntegration.initialAudioDevice(activeContents.getMedia()));
+        diagnostics.setMedia(activeContents.getMedia());
         updateEndUserState();
     }
 
@@ -2844,23 +3284,57 @@ public class JingleRtpConnection extends AbstractJingleConnection
         }
     }
 
+    // то же, что ExternalServiceDiscoveryManager.getIceServers(), но с данными для отчета: время
+    // ответа, число серверов и срок действия учетных данных TURN
     private void discoverIceServers(final OnIceServersDiscovered onIceServersDiscovered) {
-        final var future =
-                id.account
-                        .getXmppConnection()
-                        .getManager(ExternalServiceDiscoveryManager.class)
-                        .getIceServers();
+        final var manager =
+                id.account.getXmppConnection().getManager(ExternalServiceDiscoveryManager.class);
+        if (Config.DISABLE_PROXY_LOOKUP || !manager.hasFeature()) {
+            diagnostics.setIceServerDiscovery(
+                    new CallDiagnostics.IceServerDiscovery(
+                            Config.DISABLE_PROXY_LOOKUP
+                                    ? CallDiagnostics.IceServerDiscovery.Status.DISABLED
+                                    : CallDiagnostics.IceServerDiscovery.Status.NOT_SUPPORTED,
+                            0,
+                            0,
+                            -1,
+                            null));
+            onIceServersDiscovered.onIceServersDiscovered(Collections.emptySet());
+            return;
+        }
+        final long started = SystemClock.elapsedRealtime();
         Futures.addCallback(
-                future,
+                manager.getServices(),
                 new FutureCallback<>() {
                     @Override
-                    public void onSuccess(Collection<PeerConnection.IceServer> result) {
-                        onIceServersDiscovered.onIceServersDiscovered(result);
+                    public void onSuccess(final Services services) {
+                        final var iceServers = services.getIceServers();
+                        diagnostics.setIceServerDiscovery(
+                                new CallDiagnostics.IceServerDiscovery(
+                                        iceServers.isEmpty()
+                                                ? CallDiagnostics.IceServerDiscovery.Status.EMPTY
+                                                : CallDiagnostics.IceServerDiscovery.Status.OK,
+                                        SystemClock.elapsedRealtime() - started,
+                                        iceServers.size(),
+                                        CallDiagnostics.IceServerDiscovery.expiresAt(
+                                                Collections2.transform(
+                                                        services.getServices(),
+                                                        service ->
+                                                                service.getAttribute("expires"))),
+                                        null));
+                        onIceServersDiscovered.onIceServersDiscovered(iceServers);
                     }
 
                     @Override
-                    public void onFailure(@NonNull Throwable t) {
+                    public void onFailure(@NonNull final Throwable t) {
                         Log.d(Config.LOGTAG, "could not discover ice servers", t);
+                        diagnostics.setIceServerDiscovery(
+                                new CallDiagnostics.IceServerDiscovery(
+                                        CallDiagnostics.IceServerDiscovery.Status.ERROR,
+                                        SystemClock.elapsedRealtime() - started,
+                                        0,
+                                        -1,
+                                        CallDiagnostics.errorName(t)));
                         onIceServersDiscovered.onIceServersDiscovered(Collections.emptySet());
                     }
                 },
@@ -2876,6 +3350,7 @@ public class JingleRtpConnection extends AbstractJingleConnection
     protected void finish() {
         if (isTerminated()) {
             this.cancelRingingTimeout();
+            this.stopStatsCollection();
             this.callIntegration.verifyDisconnected();
             this.webRTCWrapper.verifyClosed();
             this.id

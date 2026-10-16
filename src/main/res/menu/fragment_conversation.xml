@@ -60,6 +60,16 @@
         android:title="@string/action_clear_history"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_last_call_report"
+        android:orderInCategory="55"
+        android:title="@string/cocosations_last_call_report"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_channel_check"
+        android:orderInCategory="56"
+        android:title="@string/cocosations_network_check"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_archive"
         android:orderInCategory="60"
         android:title="@string/action_archive_chat"

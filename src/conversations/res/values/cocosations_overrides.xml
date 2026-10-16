@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- строки upstream с захардкоженным названием приложения -->
+    <string name="conversations_backup">Cocosations backup</string>
+    <string name="not_a_backup_file">The file you selected is not a Cocosations backup file</string>
+</resources>

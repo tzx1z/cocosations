@@ -839,6 +839,7 @@ public class EditAccountActivity extends OmemoActivity
         final MenuItem mamPrefs = menu.findItem(R.id.action_mam_prefs);
         final MenuItem changePresence = menu.findItem(R.id.action_change_presence);
         final MenuItem share = menu.findItem(R.id.action_share);
+        menu.findItem(R.id.action_network_check).setVisible(mAccount != null && !mInitMode);
         renewCertificate.setVisible(mAccount != null && mAccount.getPrivateKeyAlias() != null);
 
         share.setVisible(mAccount != null && !mInitMode);
@@ -1068,6 +1069,9 @@ public class EditAccountActivity extends OmemoActivity
             final Intent showBlocklistIntent = new Intent(this, BlocklistActivity.class);
             showBlocklistIntent.putExtra(EXTRA_ACCOUNT, mAccount.getJid().toString());
             startActivity(showBlocklistIntent);
+            return true;
+        } else if (itemId == R.id.action_network_check) {
+            NetworkCheckActivity.launch(this, mAccount);
             return true;
         } else if (itemId == R.id.action_server_info_show_more) {
             changeMoreTableVisibility(!item.isChecked());

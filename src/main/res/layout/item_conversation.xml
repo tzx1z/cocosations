@@ -43,10 +43,27 @@
                         android:layout_height="wrap_content"
                         android:layout_alignStart="@+id/conversation_lastwrapper"
                         android:layout_marginEnd="4dp"
-                        android:layout_toStartOf="@+id/conversation_lastupdate"
+                        android:layout_toStartOf="@+id/conversation_last_seen"
                         android:ellipsize="end"
                         android:maxLines="1"
                         tools:text="Juliet Capulet" />
+
+                    <TextView
+                        android:id="@+id/conversation_last_seen"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_alignBaseline="@+id/conversation_name"
+                        android:layout_marginEnd="8dp"
+                        android:layout_toStartOf="@+id/conversation_lastupdate"
+                        android:drawablePadding="4dp"
+                        android:gravity="center_vertical"
+                        android:singleLine="true"
+                        android:textAppearance="?textAppearanceLabelMedium"
+                        android:textColor="?colorOnSurfaceVariant"
+                        android:visibility="gone"
+                        app:drawableStartCompat="@drawable/cocosations_presence_dot"
+                        tools:text="2 h ago"
+                        tools:visibility="visible" />
 
                     <RelativeLayout
                         android:id="@+id/conversation_lastwrapper"

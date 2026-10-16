@@ -22,6 +22,7 @@ import eu.siacs.conversations.entities.ListItem;
 import eu.siacs.conversations.ui.BlocklistActivity;
 import eu.siacs.conversations.ui.XmppActivity;
 import eu.siacs.conversations.ui.util.AvatarWorkerTask;
+import eu.siacs.conversations.ui.util.LastSeenBadge;
 import eu.siacs.conversations.utils.IrregularUnicodeDetector;
 import eu.siacs.conversations.xmpp.Jid;
 import im.conversations.android.model.DynamicTag;
@@ -86,12 +87,18 @@ public class ListItemAdapter extends ArrayAdapter<ListItem> {
             viewHolder.jid.setVisibility(View.GONE);
         }
         viewHolder.name.setText(item.getDisplayName());
+        if (item instanceof Contact contact) {
+            LastSeenBadge.bind(viewHolder.lastSeen, contact);
+        } else {
+            viewHolder.lastSeen.setVisibility(View.GONE);
+        }
         AvatarWorkerTask.loadAvatar(item, viewHolder.avatar, R.dimen.avatar);
         return view;
     }
 
     private static class ViewHolder {
         private TextView name;
+        private TextView lastSeen;
         private TextView jid;
         private ImageView avatar;
         private ConstraintLayout tags;
@@ -102,6 +109,7 @@ public class ListItemAdapter extends ArrayAdapter<ListItem> {
         public static ViewHolder get(final ItemContactBinding binding) {
             ViewHolder viewHolder = new ViewHolder();
             viewHolder.name = binding.contactDisplayName;
+            viewHolder.lastSeen = binding.contactLastSeen;
             viewHolder.jid = binding.contactJid;
             viewHolder.avatar = binding.contactPhoto;
             viewHolder.tags = binding.tags;

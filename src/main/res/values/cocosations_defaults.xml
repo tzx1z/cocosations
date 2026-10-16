@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <integer name="cocosations_call_reports_limit">1</integer>
+    <bool name="cocosations_call_logging">false</bool>
+    <bool name="cocosations_system_dialer_calls">false</bool>
+    <string-array name="cocosations_call_reports_limits" translatable="false">
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>5</item>
+        <item>10</item>
+        <item>20</item>
+        <item>50</item>
+        <item>100</item>
+        <item>200</item>
+        <item>500</item>
+    </string-array>
+</resources>

@@ -1,0 +1,6 @@
+First Cocosations release in the F-Droid repository, based on Conversations 2.20.4.
+• Call diagnostics, call report and call journal
+• Channel check for calls over TURN
+• Last seen of contacts
+• Incoming audio calls via the system Phone app
+• The call journal keeps 1 report by default, 1 to 500 in settings

@@ -15,4 +15,8 @@
         android:id="@+id/action_switch_to_video"
         android:title="@string/switch_to_video"
         app:showAsAction="never" />
+    <item
+        android:id="@+id/action_call_diagnostics"
+        android:title="@string/cocosations_call_diagnostics"
+        app:showAsAction="never" />
 </menu>

@@ -34,6 +34,7 @@ import im.conversations.android.xmpp.model.disco.info.InfoQuery;
 import im.conversations.android.xmpp.model.idle.LastUserInteraction;
 import im.conversations.android.xmpp.model.stanza.Presence;
 import im.conversations.android.xmpp.model.stanza.Stanza;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -72,6 +73,8 @@ public class Contact implements ListItem, Blockable, MucOptions.IdentifiableUser
 
     private String mLastPresence = null;
     private RtpCapability.Capability rtpCapability;
+    // время последней активности в мс; колонка last_time осталась в схеме от старого last seen
+    private long lastSeen = 0;
 
     public Contact(
             final String account,
@@ -86,7 +89,8 @@ public class Contact implements ListItem, Blockable, MucOptions.IdentifiableUser
             final String avatar,
             final String presence,
             final Collection<String> groups,
-            final RtpCapability.Capability rtpCapability) {
+            final RtpCapability.Capability rtpCapability,
+            final long lastSeen) {
         this.accountUuid = account;
         this.systemName = systemName;
         this.serverName = serverName;
@@ -100,6 +104,7 @@ public class Contact implements ListItem, Blockable, MucOptions.IdentifiableUser
         this.groups = groups;
         this.mLastPresence = presence;
         this.rtpCapability = rtpCapability;
+        this.lastSeen = lastSeen;
     }
 
     public Contact(final Jid jid) {
@@ -136,7 +141,8 @@ public class Contact implements ListItem, Blockable, MucOptions.IdentifiableUser
                 cursor.getString(cursor.getColumnIndexOrThrow(LAST_PRESENCE)),
                 jsonToStringCollection(cursor.getString(cursor.getColumnIndexOrThrow(GROUPS))),
                 RtpCapability.Capability.of(
-                        cursor.getString(cursor.getColumnIndexOrThrow(RTP_CAPABILITY))));
+                        cursor.getString(cursor.getColumnIndexOrThrow(RTP_CAPABILITY))),
+                cursor.getLong(cursor.getColumnIndexOrThrow(LAST_TIME)));
     }
 
     private static Collection<String> jsonToStringCollection(final String json) {
@@ -229,6 +235,7 @@ public class Contact implements ListItem, Blockable, MucOptions.IdentifiableUser
         values.put(LAST_PRESENCE, mLastPresence);
         values.put(GROUPS, Services.GSON.toJson(this.groups));
         values.put(RTP_CAPABILITY, rtpCapability == null ? null : rtpCapability.toString());
+        values.put(LAST_TIME, lastSeen);
         return values;
     }
 
@@ -262,6 +269,11 @@ public class Contact implements ListItem, Blockable, MucOptions.IdentifiableUser
     public LastUserInteraction getLastUserInteraction() {
         final Collection<LastUserInteraction> interactions;
         final var presences = getPresences();
+        if (presences.isEmpty()) {
+            return lastSeen > 0
+                    ? LastUserInteraction.idle(Instant.ofEpochMilli(lastSeen))
+                    : LastUserInteraction.none();
+        }
 
         // getShowStatus shows DND if any presence is DND
         // if we were to look at all presence for last interaction title might show 'online' while
@@ -276,6 +288,20 @@ public class Contact implements ListItem, Blockable, MucOptions.IdentifiableUser
             interactions = Collections2.transform(dnd, Presence::getLastUserInteraction);
         }
         return LastUserInteraction.max(interactions);
+    }
+
+    public long getLastSeen() {
+        return this.lastSeen;
+    }
+
+    /** Время только растет: старый ответ сервера не должен затирать более свежее наблюдение. */
+    public boolean setLastSeen(final long timestamp) {
+        final long clamped = Math.min(timestamp, System.currentTimeMillis());
+        if (clamped <= this.lastSeen) {
+            return false;
+        }
+        this.lastSeen = clamped;
+        return true;
     }
 
     public List<Optional<InfoQuery>> getCapabilities() {

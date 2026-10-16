@@ -163,7 +163,10 @@ public class MessageParser extends AbstractParser
                                     JingleRtpConnection.JINGLE_MESSAGE_PROPOSE_ID_PREFIX.length());
                     getManager(JingleManager.class)
                             .updateProposedSessionDiscovered(
-                                    from, sessionId, JingleManager.DeviceDiscoveryState.FAILED);
+                                    from,
+                                    sessionId,
+                                    JingleManager.DeviceDiscoveryState.FAILED,
+                                    extractErrorCondition(packet));
                     return true;
                 }
                 if (id.startsWith(JingleRtpConnection.JINGLE_MESSAGE_PROCEED_ID_PREFIX)) {
@@ -171,7 +174,8 @@ public class MessageParser extends AbstractParser
                             id.substring(
                                     JingleRtpConnection.JINGLE_MESSAGE_PROCEED_ID_PREFIX.length());
                     final String message = extractErrorMessage(packet);
-                    getManager(JingleManager.class).failProceed(from, sessionId, message);
+                    getManager(JingleManager.class)
+                            .failProceed(from, sessionId, message, extractErrorCondition(packet));
                     return true;
                 }
                 mXmppConnectionService.markMessage(

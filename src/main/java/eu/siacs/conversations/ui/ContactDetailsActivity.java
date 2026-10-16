@@ -16,6 +16,7 @@ import android.provider.ContactsContract.Intents;
 import android.provider.Settings;
 import android.text.Spannable;
 import android.text.SpannableString;
+import android.text.format.DateUtils;
 import android.text.style.RelativeSizeSpan;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -27,6 +28,8 @@ import android.widget.CompoundButton.OnCheckedChangeListener;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.StringRes;
 import androidx.databinding.DataBindingUtil;
 import com.google.android.material.color.MaterialColors;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
@@ -63,14 +66,19 @@ import eu.siacs.conversations.utils.Compatibility;
 import eu.siacs.conversations.utils.Emoticons;
 import eu.siacs.conversations.utils.IrregularUnicodeDetector;
 import eu.siacs.conversations.utils.PhoneNumberUtilWrapper;
+import eu.siacs.conversations.utils.UIHelper;
 import eu.siacs.conversations.xmpp.Jid;
 import eu.siacs.conversations.xmpp.OnKeyStatusUpdated;
 import eu.siacs.conversations.xmpp.OnUpdateBlocklist;
 import eu.siacs.conversations.xmpp.XmppConnection;
 import eu.siacs.conversations.xmpp.manager.BlockingManager;
+import eu.siacs.conversations.xmpp.manager.LastActivityManager;
 import eu.siacs.conversations.xmpp.manager.PresenceManager;
 import eu.siacs.conversations.xmpp.manager.RosterManager;
+import im.conversations.android.xmpp.model.idle.LastUserInteraction;
 import im.conversations.android.xmpp.model.stanza.Presence;
+import java.text.DateFormat;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -330,6 +338,12 @@ public class ContactDetailsActivity extends OmemoActivity
         } else if (itemId == R.id.action_share_http) {
             shareLink(true);
             return true;
+        } else if (itemId == R.id.action_last_call_report) {
+            if (contact != null) {
+                CallDiagnosticsActivity.launchLastCall(
+                        this, contact.getAccount(), contact.getAddress());
+            }
+            return true;
         } else if (itemId == R.id.action_share_uri) {
             shareLink(false);
             return true;
@@ -403,10 +417,13 @@ public class ContactDetailsActivity extends OmemoActivity
         final MenuItem edit = menu.findItem(R.id.action_edit_contact);
         final MenuItem delete = menu.findItem(R.id.action_delete_contact);
         final MenuItem customNotifications = menu.findItem(R.id.action_custom_notifications);
+        final MenuItem lastCallReport = menu.findItem(R.id.action_last_call_report);
         customNotifications.setVisible(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R);
         if (contact == null) {
+            lastCallReport.setVisible(false);
             return true;
         }
+        lastCallReport.setVisible(!contact.isSelf());
         final XmppConnection connection = contact.getAccount().getXmppConnection();
         if (connection != null && connection.getManager(BlockingManager.class).hasFeature()) {
             if (this.contact.isBlocked()) {
@@ -423,6 +440,106 @@ public class ContactDetailsActivity extends OmemoActivity
             delete.setVisible(false);
         }
         return super.onCreateOptionsMenu(menu);
+    }
+
+    private void populateLastSeen() {
+        if (contact.isSelf() || contact.isBlocked()) {
+            binding.detailsLastSeen.setVisibility(View.GONE);
+            binding.detailsLastSeenSource.setVisibility(View.GONE);
+            return;
+        }
+        final boolean online = !contact.getPresences().isEmpty();
+        final var manager =
+                contact.getAccount().getXmppConnection().getManager(LastActivityManager.class);
+        if (!online) {
+            manager.request(contact);
+        }
+        final var interaction = contact.getLastUserInteraction();
+        if (interaction instanceof LastUserInteraction.Idle idle) {
+            binding.detailsLastSeen.setText(
+                    getString(
+                            R.string.cocosations_last_activity,
+                            UIHelper.lastSeenExact(this, idle.getSince().toEpochMilli())));
+            binding.detailsLastSeen.setVisibility(View.VISIBLE);
+        } else if (online) {
+            binding.detailsLastSeen.setText(R.string.cocosations_last_activity_online);
+            binding.detailsLastSeen.setVisibility(View.VISIBLE);
+        } else {
+            binding.detailsLastSeen.setVisibility(View.GONE);
+        }
+        final String source = lastSeenSource(online, manager.getStatus(contact.getAddress()));
+        binding.detailsLastSeenSource.setText(source);
+        binding.detailsLastSeenSource.setVisibility(source.isEmpty() ? View.GONE : View.VISIBLE);
+    }
+
+    // для диагностики: откуда взято время и чем закончился запрос XEP-0012
+    private String lastSeenSource(
+            final boolean online, @Nullable final LastActivityManager.Status status) {
+        final List<String> lines = new ArrayList<>();
+        if (online) {
+            if (contact.getLastUserInteraction() instanceof LastUserInteraction.Idle) {
+                lines.add(
+                        getString(
+                                R.string.cocosations_last_seen_source,
+                                getString(R.string.cocosations_last_seen_source_presence)));
+            }
+        } else if (status != null && status.source() != null) {
+            lines.add(
+                    getString(
+                            R.string.cocosations_last_seen_source,
+                            getString(
+                                    R.string.cocosations_last_seen_source_value,
+                                    getString(sourceLabel(status.source())),
+                                    shortTime(status.sourceAt()))));
+        } else if (contact.getLastSeen() > 0) {
+            lines.add(
+                    getString(
+                            R.string.cocosations_last_seen_source,
+                            getString(R.string.cocosations_last_seen_source_stored)));
+        }
+        if (!contact.getOption(Contact.Options.TO)) {
+            lines.add(getString(R.string.cocosations_last_seen_query_no_subscription));
+        } else if (status != null && status.queriedAt() > 0) {
+            lines.add(
+                    getString(
+                            R.string.cocosations_last_seen_query,
+                            shortTime(status.queriedAt()),
+                            queryResult(status.queryResult())));
+        }
+        return String.join("\n", lines);
+    }
+
+    private String shortTime(final long time) {
+        return DateUtils.formatSameDayTime(
+                        time, System.currentTimeMillis(), DateFormat.SHORT, DateFormat.SHORT)
+                .toString();
+    }
+
+    @StringRes
+    private static int sourceLabel(final LastActivityManager.Source source) {
+        return switch (source) {
+            case XEP_0319 -> R.string.cocosations_last_seen_source_xep0319;
+            case XEP_0256 -> R.string.cocosations_last_seen_source_xep0256;
+            case DELAY -> R.string.cocosations_last_seen_source_delay;
+            case OBSERVED -> R.string.cocosations_last_seen_source_observed;
+            case XEP_0012 -> R.string.cocosations_last_seen_source_xep0012;
+        };
+    }
+
+    private String queryResult(@Nullable final String result) {
+        if (result == null) {
+            return getString(R.string.cocosations_last_seen_query_pending);
+        }
+        return switch (result) {
+            case "result" -> getString(R.string.cocosations_last_seen_query_result);
+            case "online" -> getString(R.string.cocosations_last_seen_query_online);
+            case "timeout" -> getString(R.string.cocosations_last_seen_query_timeout);
+            case "feature-not-implemented", "service-unavailable" ->
+                    getString(R.string.cocosations_last_seen_query_unsupported, result);
+            case "forbidden", "not-authorized", "subscription-required" ->
+                    getString(R.string.cocosations_last_seen_query_forbidden, result);
+            default -> getString(R.string.cocosations_last_seen_query_error, result);
+        };
     }
 
     private void populateView() {
@@ -497,6 +614,7 @@ public class ContactDetailsActivity extends OmemoActivity
         }
         binding.detailsContactXmppAddress.setText(
                 IrregularUnicodeDetector.style(this, contact.getAddress()));
+        populateLastSeen();
         final String account = contact.getAccount().getJid().asBareJid().toString();
         binding.detailsAccount.setOnClickListener(this::onDetailsAccountClicked);
         binding.detailsAccount.setText(getString(R.string.using_account, account));

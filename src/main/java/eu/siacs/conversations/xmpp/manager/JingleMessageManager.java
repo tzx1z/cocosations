@@ -10,6 +10,7 @@ import eu.siacs.conversations.xml.Element;
 import eu.siacs.conversations.xml.Namespace;
 import eu.siacs.conversations.xmpp.Jid;
 import eu.siacs.conversations.xmpp.XmppConnection;
+import eu.siacs.conversations.xmpp.jingle.CallDiagnostics;
 import eu.siacs.conversations.xmpp.jingle.JingleRtpConnection;
 import eu.siacs.conversations.xmpp.jingle.Media;
 import im.conversations.android.xmpp.model.hints.Store;
@@ -179,6 +180,7 @@ public class JingleMessageManager extends AbstractManager {
         packet.addExtension(new Request());
         packet.addExtension(new Store());
         this.connection.sendMessagePacket(packet);
+        recordSent(sessionId, CallDiagnostics.EventType.PROPOSE_SENT, with);
     }
 
     public void retract(final Jid with, final String sessionId) {
@@ -187,6 +189,7 @@ public class JingleMessageManager extends AbstractManager {
         packet.addExtension(new Retract(sessionId));
         packet.addExtension(new Store());
         this.connection.sendMessagePacket(packet);
+        recordSent(sessionId, CallDiagnostics.EventType.RETRACT_SENT, with);
     }
 
     public void reject(final Jid with, final String sessionId) {
@@ -195,6 +198,7 @@ public class JingleMessageManager extends AbstractManager {
         packet.addExtension(new Reject(sessionId));
         packet.addExtension(new Store());
         this.connection.sendMessagePacket(packet);
+        recordSent(sessionId, CallDiagnostics.EventType.REJECT_SENT, with);
     }
 
     public void ringing(final Jid with, final String sessionId) {
@@ -203,6 +207,7 @@ public class JingleMessageManager extends AbstractManager {
         packet.addExtension(new Ringing(sessionId));
         packet.addExtension(new Store());
         this.connection.sendMessagePacket(packet);
+        recordSent(sessionId, CallDiagnostics.EventType.RINGING_SENT, with);
     }
 
     public void accept(final String sessionId) {
@@ -224,6 +229,7 @@ public class JingleMessageManager extends AbstractManager {
         }
         packet.addExtension(new Store());
         this.connection.sendMessagePacket(packet);
+        recordSent(sessionId, CallDiagnostics.EventType.PROCEED_SENT, with);
     }
 
     public void finish(final Jid with, final String sessionId, final Reason reason) {
@@ -235,5 +241,14 @@ public class JingleMessageManager extends AbstractManager {
         wrapper.addExtension(reason);
         packet.addExtension(new Store());
         this.connection.sendMessagePacket(packet);
+    }
+
+    private void recordSent(
+            final String sessionId, final CallDiagnostics.EventType type, final Jid with) {
+        final var diagnostics = getManager(JingleManager.class).getCallDiagnostics(sessionId);
+        // события после завершения уже не попадут в сохраненный отчет
+        if (diagnostics != null && !diagnostics.isEnded()) {
+            diagnostics.event(type, with.toString());
+        }
     }
 }

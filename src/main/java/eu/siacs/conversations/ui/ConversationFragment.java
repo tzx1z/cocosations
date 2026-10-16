@@ -146,6 +146,7 @@ import eu.siacs.conversations.utils.UIHelper;
 import eu.siacs.conversations.xmpp.Jid;
 import eu.siacs.conversations.xmpp.XmppConnection;
 import eu.siacs.conversations.xmpp.jingle.AbstractJingleConnection;
+import eu.siacs.conversations.xmpp.jingle.CallReportStore;
 import eu.siacs.conversations.xmpp.jingle.JingleFileTransferConnection;
 import eu.siacs.conversations.xmpp.jingle.Media;
 import eu.siacs.conversations.xmpp.jingle.OngoingRtpSession;
@@ -155,6 +156,7 @@ import eu.siacs.conversations.xmpp.manager.ChatStateManager;
 import eu.siacs.conversations.xmpp.manager.EntityTimeManager;
 import eu.siacs.conversations.xmpp.manager.HttpUploadManager;
 import eu.siacs.conversations.xmpp.manager.JingleManager;
+import eu.siacs.conversations.xmpp.manager.LastActivityManager;
 import eu.siacs.conversations.xmpp.manager.MessageArchiveManager;
 import eu.siacs.conversations.xmpp.manager.ModerationManager;
 import eu.siacs.conversations.xmpp.manager.MultiUserChatManager;
@@ -281,7 +283,6 @@ public class ConversationFragment extends XmppFragment
                         }
                     });
     private InputSettings inputSettings = new InputSettings(true, false, false, true);
-    private boolean mShowLastUserInteraction = false;
     public Uri mPendingEditorContent = null;
     protected MessageAdapter messageListAdapter;
     private String lastMessageUuid = null;
@@ -676,6 +677,8 @@ public class ConversationFragment extends XmppFragment
                     final MenuItem menuOngoingCall = menu.findItem(R.id.action_ongoing_call);
                     final MenuItem menuVideoCall = menu.findItem(R.id.action_video_call);
                     final MenuItem menuTogglePinned = menu.findItem(R.id.action_toggle_pinned);
+                    final MenuItem menuLastCallReport = menu.findItem(R.id.action_last_call_report);
+                    final MenuItem menuChannelCheck = menu.findItem(R.id.action_channel_check);
                     final var c = ConversationFragment.this.conversation;
                     if (c == null) {
                         return;
@@ -684,7 +687,11 @@ public class ConversationFragment extends XmppFragment
                         menuInviteContact.setVisible(c.getMucOptions().canInvite());
                         menuCall.setVisible(false);
                         menuOngoingCall.setVisible(false);
+                        menuLastCallReport.setVisible(false);
+                        menuChannelCheck.setVisible(false);
                     } else {
+                        menuLastCallReport.setVisible(!c.getContact().isSelf());
+                        menuChannelCheck.setVisible(!c.getContact().isSelf());
                         final var manager =
                                 c.getAccount().getXmppConnection().getManager(JingleManager.class);
                         final XmppConnectionService service = getXmppConnectionService();
@@ -778,6 +785,16 @@ public class ConversationFragment extends XmppFragment
                         return true;
                     } else if (itemId == R.id.action_toggle_pinned) {
                         togglePinned();
+                        return true;
+                    } else if (itemId == R.id.action_last_call_report) {
+                        CallDiagnosticsActivity.launchLastCall(
+                                requireActivity(),
+                                conversation.getAccount(),
+                                conversation.getContact().getAddress());
+                        return true;
+                    } else if (itemId == R.id.action_channel_check) {
+                        NetworkCheckActivity.launch(
+                                requireActivity(), conversation.getAccount(), true);
                         return true;
                     } else {
                         return false;
@@ -1505,6 +1522,24 @@ public class ConversationFragment extends XmppFragment
         }
     }
 
+    // у сообщения о звонке remoteMsgId - session id Jingle
+    private boolean hasCallReport(final Message message) {
+        final String sessionId = message.getRemoteMsgId();
+        final var conversation = this.conversation;
+        if (sessionId == null || conversation == null) {
+            return false;
+        }
+        final var account = conversation.getAccount();
+        final var diagnostics =
+                account.getXmppConnection()
+                        .getManager(JingleManager.class)
+                        .getCallDiagnostics(sessionId);
+        if (diagnostics != null && diagnostics.isReportWorthy()) {
+            return true;
+        }
+        return CallReportStore.of(requireContext()).hasSession(account.getUuid(), sessionId);
+    }
+
     private static boolean isAckedModerationDisclaimer() {
         return ackModeration.isAfter(Instant.now());
     }
@@ -1512,6 +1547,16 @@ public class ConversationFragment extends XmppFragment
     private void populateContextMenu(final ContextMenu menu) {
         final Message m = this.selectedMessage;
         final Transferable t = m.getTransferable();
+        if (m.getType() == Message.TYPE_RTP_SESSION) {
+            // меню без пунктов не показывается, поэтому для звонка без отчета его нет
+            if (hasCallReport(m)) {
+                requireActivity()
+                        .getMenuInflater()
+                        .inflate(R.menu.cocosations_rtp_message_context, menu);
+                menu.setHeaderTitle(R.string.message_options);
+            }
+            return;
+        }
         if (m.getType() != Message.TYPE_STATUS && m.getType() != Message.TYPE_RTP_SESSION) {
 
             if (m.getEncryption() == Message.ENCRYPTION_AXOLOTL_NOT_FOR_THIS_DEVICE
@@ -1712,6 +1757,14 @@ public class ConversationFragment extends XmppFragment
 
     @Override
     public boolean onContextItemSelected(MenuItem item) {
+        if (item.getItemId() == R.id.action_call_diagnostics_message) {
+            final var message = this.selectedMessage;
+            if (message != null && message.getRemoteMsgId() != null && conversation != null) {
+                CallDiagnosticsActivity.launch(
+                        requireActivity(), conversation.getAccount(), message.getRemoteMsgId());
+            }
+            return true;
+        }
         final int itemId = item.getItemId();
         if (itemId == R.id.share_with) {
             ShareUtil.share(requireXmppActivity(), selectedMessage);
@@ -2907,7 +2960,6 @@ public class ConversationFragment extends XmppFragment
                         appSettings.isDisplayEnterKey(),
                         appSettings.isEnterSend(),
                         appSettings.isScrollToBottom());
-        this.mShowLastUserInteraction = appSettings.isBroadcastLastActivity();
         this.binding.textInput.refreshIme(this.inputSettings);
         setTextInputColors();
         refresh(false);
@@ -3439,8 +3491,14 @@ public class ConversationFragment extends XmppFragment
         this.binding.toolbar.setTitleCentered(isTabletView);
         final var c = this.conversation;
         this.binding.toolbar.setTitle(c.getName());
-        if (c.getMode() == Conversation.MODE_SINGLE && this.mShowLastUserInteraction) {
+        if (c.getMode() == Conversation.MODE_SINGLE) {
             final var contact = conversation.getContact();
+            if (contact.getPresences().isEmpty()) {
+                c.getAccount()
+                        .getXmppConnection()
+                        .getManager(LastActivityManager.class)
+                        .request(contact);
+            }
             this.binding.toolbar.setSubtitle(
                     UIHelper.lastUserInteraction(
                             requireContext(), contact.getLastUserInteraction()));

@@ -186,6 +186,9 @@ public class ConversationsOverviewFragment extends XmppFragment {
                     } else if (id == R.id.action_accounts) {
                         AccountUtils.launchManageAccounts(requireXmppActivity());
                         return true;
+                    } else if (id == R.id.action_call_journal) {
+                        startActivity(new Intent(requireContext(), CallJournalActivity.class));
+                        return true;
                     } else if (id == R.id.action_account) {
                         AccountUtils.launchManageAccount(requireXmppActivity());
                         return true;

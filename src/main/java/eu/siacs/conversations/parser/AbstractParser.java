@@ -4,6 +4,7 @@ import eu.siacs.conversations.entities.Account;
 import eu.siacs.conversations.entities.Contact;
 import eu.siacs.conversations.services.XmppConnectionService;
 import eu.siacs.conversations.xml.Element;
+import eu.siacs.conversations.xml.Namespace;
 import eu.siacs.conversations.xmpp.Jid;
 import eu.siacs.conversations.xmpp.XmppConnection;
 import im.conversations.android.xmpp.model.stanza.Stanza;
@@ -132,6 +133,20 @@ public abstract class AbstractParser extends XmppConnection.Delegate {
                 return prefixError(errorNames) + text;
             } else if (errorNames.size() > 0) {
                 return prefixError(errorNames) + errorNames.get(0).replace("-", " ");
+            }
+        }
+        return null;
+    }
+
+    /** Имя условия ошибки из RFC 6120, например remote-server-not-found. */
+    public static String extractErrorCondition(final Element packet) {
+        final Element error = packet.findChild("error");
+        if (error == null) {
+            return null;
+        }
+        for (final Element child : error.getChildren()) {
+            if (Namespace.XMPP_STANZAS.equals(child.getNamespace())) {
+                return child.getName();
             }
         }
         return null;

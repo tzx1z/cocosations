@@ -70,6 +70,7 @@ public class AppSettings {
     public static final String SHOW_AVATARS_11 = "show_avatars";
     public static final String SHOW_AVATARS_ACCOUNTS = "show_avatars_accounts";
     public static final String CALL_INTEGRATION = "call_integration";
+    public static final String SYSTEM_DIALER_CALLS = "system_dialer_calls";
     public static final String ALIGN_START = "align_start";
     public static final String BACKUP_LOCATION = "backup_location";
     public static final String AUTO_ACCEPT_FILE_SIZE = "auto_accept_file_size";
@@ -77,6 +78,8 @@ public class AppSettings {
     public static final String AUTO_SEND_RECORDING = "auto_send_recording";
     public static final String USE_SHARED_STORAGE = "use_shared_storage";
     public static final String QUICK_ACTION = "quick_action_button";
+    public static final String CALL_REPORTS_LIMIT = "call_reports_limit";
+    public static final String CALL_LOGGING = "call_logging";
 
     private static final String ACCEPT_INVITES_FROM_STRANGERS = "accept_invites_from_strangers";
     private static final String NOTIFICATIONS_FROM_STRANGERS = "notifications_from_strangers";
@@ -168,6 +171,10 @@ public class AppSettings {
 
     public boolean isCallIntegration() {
         return getBooleanPreference(CALL_INTEGRATION, R.bool.call_integration);
+    }
+
+    public boolean isSystemDialerCalls() {
+        return getBooleanPreference(SYSTEM_DIALER_CALLS, R.bool.cocosations_system_dialer_calls);
     }
 
     public boolean isAlignStart() {
@@ -290,6 +297,16 @@ public class AppSettings {
         } catch (final NumberFormatException e) {
             return defaultValue;
         }
+    }
+
+    public boolean isCallLogging() {
+        return getBooleanPreference(CALL_LOGGING, R.bool.cocosations_call_logging);
+    }
+
+    public int getCallReportsLimit() {
+        final long limit =
+                getLongPreference(CALL_REPORTS_LIMIT, R.integer.cocosations_call_reports_limit);
+        return (int) Math.max(1, Math.min(limit, 1000));
     }
 
     public Duration getGracePeriodLength() {

@@ -3,6 +3,7 @@ package eu.siacs.conversations.xmpp.manager;
 import android.telecom.TelecomManager;
 import android.telecom.VideoProfile;
 import android.util.Log;
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import com.google.common.base.Objects;
 import com.google.common.base.Optional;
@@ -13,6 +14,9 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.MoreExecutors;
 import eu.siacs.conversations.AppSettings;
 import eu.siacs.conversations.Config;
 import eu.siacs.conversations.entities.Account;
@@ -31,6 +35,10 @@ import eu.siacs.conversations.xml.Namespace;
 import eu.siacs.conversations.xmpp.Jid;
 import eu.siacs.conversations.xmpp.XmppConnection;
 import eu.siacs.conversations.xmpp.jingle.AbstractJingleConnection;
+import eu.siacs.conversations.xmpp.jingle.CallDiagnostics;
+import eu.siacs.conversations.xmpp.jingle.CallLogCapture;
+import eu.siacs.conversations.xmpp.jingle.CallReportStore;
+import eu.siacs.conversations.xmpp.jingle.CallStage;
 import eu.siacs.conversations.xmpp.jingle.JingleFileTransferConnection;
 import eu.siacs.conversations.xmpp.jingle.JingleRtpConnection;
 import eu.siacs.conversations.xmpp.jingle.Media;
@@ -41,6 +49,7 @@ import eu.siacs.conversations.xmpp.jingle.stanzas.GenericDescription;
 import eu.siacs.conversations.xmpp.jingle.stanzas.RtpDescription;
 import eu.siacs.conversations.xmpp.jingle.transports.InbandBytestreamsTransport;
 import eu.siacs.conversations.xmpp.jingle.transports.Transport;
+import im.conversations.android.xmpp.IqErrorException;
 import im.conversations.android.xmpp.IqProcessingException;
 import im.conversations.android.xmpp.model.error.Condition;
 import im.conversations.android.xmpp.model.ibb.InBandByteStream;
@@ -76,6 +85,13 @@ public class JingleManager extends AbstractManager {
 
     private final Cache<PersistableSessionId, TerminatedRtpSession> terminatedSessions =
             CacheBuilder.newBuilder().expireAfterWrite(24, TimeUnit.HOURS).build();
+
+    // ключ - session id; отчет нужен и после завершения сессии, когда открывается экран
+    // диагностики, а для исходящего звонка он появляется раньше JingleRtpConnection
+    private static final long CALL_LOG_TAIL_SECONDS = 2;
+
+    private final Cache<String, CallDiagnostics> callDiagnostics =
+            CacheBuilder.newBuilder().maximumSize(16).expireAfterWrite(6, TimeUnit.HOURS).build();
 
     private final XmppConnectionService service;
 
@@ -228,6 +244,16 @@ public class JingleManager extends AbstractManager {
                     getRtpSessionProposal(from.asBareJid(), id.sessionId);
             synchronized (rtpSessionProposals) {
                 if (proposal != null) {
+                    final var diagnostics = callDiagnostics.getIfPresent(proposal.sessionId);
+                    if (diagnostics != null) {
+                        diagnostics.event(
+                                CallDiagnostics.EventType.REJECT_RECEIVED, from.toString());
+                        diagnostics.setEndReason("reject", null, true);
+                        diagnostics.confirmFederation(CallDiagnostics.FederationEvidence.REJECT);
+                        diagnostics.advance(CallStage.WAITING_FOR_PEER);
+                        diagnostics.fail(CallDiagnostics.Reason.DECLINED, null);
+                        diagnostics.end();
+                    }
                     setTerminalSessionState(proposal, RtpEndUserState.DECLINED_OR_BUSY);
                     rtpSessionProposals.remove(proposal);
                     proposal.callIntegration.busy();
@@ -249,6 +275,10 @@ public class JingleManager extends AbstractManager {
             }
         } else if (addressedDirectly && message instanceof Ringing) {
             Log.d(Config.LOGTAG, account.getJid().asBareJid() + ": " + from + " started ringing");
+            final var diagnostics = callDiagnostics.getIfPresent(id.sessionId);
+            if (diagnostics != null) {
+                diagnostics.event(CallDiagnostics.EventType.RINGING_RECEIVED, from.toString());
+            }
             updateProposedSessionDiscovered(from, id.sessionId, DeviceDiscoveryState.DISCOVERED);
         } else {
             Log.d(
@@ -438,7 +468,7 @@ public class JingleManager extends AbstractManager {
                     "skip call integration because something must have gone during initiate");
             return;
         }
-        if (CallIntegrationConnectionService.addNewIncomingCall(context, rtpConnection.getId())) {
+        if (CallIntegrationConnectionService.addNewIncomingCall(context, rtpConnection)) {
             return;
         }
         rtpConnection.integrationFailure();
@@ -710,6 +740,15 @@ public class JingleManager extends AbstractManager {
                         + ": retracting rtp session proposal with "
                         + rtpSessionProposal.with);
         this.rtpSessionProposals.remove(rtpSessionProposal);
+        final var diagnostics = callDiagnostics.getIfPresent(rtpSessionProposal.sessionId);
+        if (diagnostics != null) {
+            // retract уходит после закрытия отчета, поэтому фиксируем его здесь
+            diagnostics.event(
+                    CallDiagnostics.EventType.RETRACT_SENT, rtpSessionProposal.with.toString());
+            diagnostics.setEndReason("retract", null, false);
+            diagnostics.setLocalHangup();
+            diagnostics.end();
+        }
         rtpSessionProposal.callIntegration.retracted();
         if (refresh) {
             this.service.notifyJingleRtpConnectionUpdate(
@@ -786,6 +825,7 @@ public class JingleManager extends AbstractManager {
                     RtpSessionProposal.of(with.asBareJid(), media, callIntegration);
             callIntegration.setCallback(new ProposalStateCallback(proposal));
             this.rtpSessionProposals.put(proposal, DeviceDiscoveryState.SEARCHING);
+            startCallDiagnostics(proposal, contact);
             this.service.notifyJingleRtpConnectionUpdate(
                     account, proposal.with, proposal.sessionId, RtpEndUserState.FINDING_DEVICE);
             // in privacy preserving environments 'propose' is only ACKed when we have presence
@@ -827,6 +867,15 @@ public class JingleManager extends AbstractManager {
             endUserState = RtpEndUserState.NO_INTERNET;
         }
         Log.d(Config.LOGTAG, "call proposal still in device discovery state after timeout");
+        final var diagnostics = callDiagnostics.getIfPresent(proposal.sessionId);
+        if (diagnostics != null) {
+            if (endUserState == RtpEndUserState.NO_INTERNET) {
+                diagnostics.fail(CallDiagnostics.Reason.NO_NETWORK, null);
+            } else {
+                diagnostics.timeout();
+            }
+            diagnostics.end();
+        }
         setTerminalSessionState(proposal, endUserState);
 
         rtpSessionProposals.remove(proposal);
@@ -951,6 +1000,14 @@ public class JingleManager extends AbstractManager {
 
     public void updateProposedSessionDiscovered(
             final Jid from, final String sessionId, final DeviceDiscoveryState target) {
+        updateProposedSessionDiscovered(from, sessionId, target, null);
+    }
+
+    public void updateProposedSessionDiscovered(
+            final Jid from,
+            final String sessionId,
+            final DeviceDiscoveryState target,
+            @Nullable final String errorCondition) {
         synchronized (this.rtpSessionProposals) {
             final RtpSessionProposal sessionProposal =
                     getRtpSessionProposal(from.asBareJid(), sessionId);
@@ -981,6 +1038,30 @@ public class JingleManager extends AbstractManager {
                             + target);
 
             final RtpEndUserState endUserState = target.toEndUserState();
+
+            final var diagnostics = callDiagnostics.getIfPresent(sessionId);
+            if (diagnostics != null) {
+                switch (target) {
+                    case SEARCHING_ACKNOWLEDGED -> {
+                        diagnostics.event(CallDiagnostics.EventType.PROPOSE_ACKNOWLEDGED);
+                        diagnostics.advance(CallStage.RESOLVING_REMOTE_SERVER);
+                    }
+                    case DISCOVERED -> {
+                        diagnostics.event(
+                                CallDiagnostics.EventType.PEER_DEVICE_FOUND, from.toString());
+                        diagnostics.confirmFederation(
+                                CallDiagnostics.FederationEvidence.DEVICE_FOUND);
+                        diagnostics.advance(CallStage.WAITING_FOR_PEER);
+                    }
+                    case FAILED -> {
+                        diagnostics.event(
+                                CallDiagnostics.EventType.PROPOSE_BOUNCED, errorCondition);
+                        diagnostics.failWithCondition(errorCondition);
+                        diagnostics.end();
+                    }
+                    default -> {}
+                }
+            }
 
             if (target == DeviceDiscoveryState.FAILED) {
                 Log.d(Config.LOGTAG, "removing session proposal after failure");
@@ -1034,11 +1115,15 @@ public class JingleManager extends AbstractManager {
         }
     }
 
-    public void failProceed(final Jid with, final String sessionId, final String message) {
+    public void failProceed(
+            final Jid with,
+            final String sessionId,
+            final String message,
+            @Nullable final String errorCondition) {
         final var id = AbstractJingleConnection.Id.of(getAccount(), with, sessionId);
         final AbstractJingleConnection existingJingleConnection = connections.get(id);
         if (existingJingleConnection instanceof JingleRtpConnection jingleRtpConnection) {
-            jingleRtpConnection.deliverFailedProceed(message);
+            jingleRtpConnection.deliverFailedProceed(message, errorCondition);
         }
     }
 
@@ -1051,6 +1136,145 @@ public class JingleManager extends AbstractManager {
                         "JingleConnection has not been registered with connection manager");
         Log.e(Config.LOGTAG, "ensureConnectionIsRegistered() failed. Going to throw", e);
         throw e;
+    }
+
+    public CallDiagnostics getOrCreateCallDiagnostics(
+            final AbstractJingleConnection.Id id, final CallDiagnostics.Direction direction) {
+        final var existing = callDiagnostics.getIfPresent(id.sessionId);
+        if (existing != null) {
+            return existing;
+        }
+        final var diagnostics = newCallDiagnostics(id.with, id.sessionId, direction);
+        callDiagnostics.put(id.sessionId, diagnostics);
+        return diagnostics;
+    }
+
+    @Nullable
+    public CallDiagnostics getCallDiagnostics(@Nullable final String sessionId) {
+        if (sessionId == null) {
+            return null;
+        }
+        for (final var connection : connections.values()) {
+            if (connection instanceof JingleRtpConnection rtpConnection
+                    && rtpConnection.getId().sessionId.equals(sessionId)) {
+                return rtpConnection.getCallDiagnostics();
+            }
+        }
+        return callDiagnostics.getIfPresent(sessionId);
+    }
+
+    /** Самый свежий отчет с контактом за время работы процесса, включая идущий звонок. */
+    @Nullable
+    public CallDiagnostics getLatestCallDiagnostics(final Jid with) {
+        final String address = with.asBareJid().toString();
+        CallDiagnostics latest = null;
+        for (final var diagnostics : callDiagnostics.asMap().values()) {
+            if (address.equals(diagnostics.getWith())
+                    && diagnostics.isReportWorthy()
+                    && (latest == null || diagnostics.getStartedAt() > latest.getStartedAt())) {
+                latest = diagnostics;
+            }
+        }
+        return latest;
+    }
+
+    private CallDiagnostics newCallDiagnostics(
+            final Jid with, final String sessionId, final CallDiagnostics.Direction direction) {
+        final var account = getAccount();
+        final boolean federated = !with.getDomain().equals(account.getJid().getDomain());
+        final var diagnostics =
+                new CallDiagnostics(direction, with.asBareJid().toString(), federated);
+        diagnostics.setSessionId(sessionId);
+        final var appSettings = new AppSettings(context);
+        final var capture = appSettings.isCallLogging() ? CallLogCapture.start(context) : null;
+        // кеш в памяти живет до перезапуска, а журнал отчетов нужен всегда
+        final var store = CallReportStore.of(context);
+        diagnostics.setOnEnded(
+                (snapshot, reportWorthy) -> {
+                    if (!reportWorthy) {
+                        if (capture != null) {
+                            SCHEDULED_EXECUTOR_SERVICE.execute(() -> capture.finish(null));
+                        }
+                        return;
+                    }
+                    final Runnable save =
+                            () ->
+                                    store.saveAsync(
+                                            account.getUuid(),
+                                            snapshot,
+                                            appSettings.getCallReportsLimit(),
+                                            capture);
+                    if (capture == null) {
+                        save.run();
+                    } else {
+                        // закрытие сессии и WebRTC пишет в лог еще пару секунд после завершения
+                        SCHEDULED_EXECUTOR_SERVICE.schedule(
+                                save, CALL_LOG_TAIL_SECONDS, TimeUnit.SECONDS);
+                    }
+                });
+        return diagnostics;
+    }
+
+    private void startCallDiagnostics(final RtpSessionProposal proposal, final Contact contact) {
+        final var diagnostics =
+                newCallDiagnostics(
+                        proposal.with, proposal.sessionId, CallDiagnostics.Direction.OUTGOING);
+        this.callDiagnostics.put(proposal.sessionId, diagnostics);
+        diagnostics.setMedia(proposal.media);
+        if (!getAccount().isOnlineAndConnected()) {
+            return;
+        }
+        // без stream management подтверждения доставки на свой сервер не будет
+        if (!connection.getFeatures().sm()) {
+            diagnostics.advance(CallStage.RESOLVING_REMOTE_SERVER);
+        }
+        if (contact.getPresences().isEmpty()) {
+            checkFederation(diagnostics, proposal.with);
+        } else {
+            // presence от собеседника уже пришла через S2S
+            diagnostics.confirmFederation(CallDiagnostics.FederationEvidence.PRESENCE);
+        }
+    }
+
+    // XEP-0199 ping домена собеседника отделяет сбой федерации от офлайн-абонента: любой ответ
+    // удаленного сервера, даже ошибка, доказывает, что S2S работает
+    private void checkFederation(final CallDiagnostics diagnostics, final Jid with) {
+        final Jid domain = with.getDomain();
+        if (domain.equals(getAccount().getJid().getDomain())) {
+            return;
+        }
+        Futures.addCallback(
+                getManager(PingManager.class).ping(domain),
+                new FutureCallback<>() {
+                    @Override
+                    public void onSuccess(final Iq result) {
+                        diagnostics.event(
+                                CallDiagnostics.EventType.SERVER_PING, domain + " - result");
+                        diagnostics.confirmFederation(CallDiagnostics.FederationEvidence.PING);
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull final Throwable throwable) {
+                        if (throwable instanceof IqErrorException iqErrorException) {
+                            final var condition = iqErrorException.getErrorCondition();
+                            final var name = condition == null ? null : condition.getName();
+                            diagnostics.event(
+                                    CallDiagnostics.EventType.SERVER_PING, domain + " - " + name);
+                            final var reason = CallDiagnostics.reasonOfCondition(name);
+                            if (reason == CallDiagnostics.Reason.REMOTE_SERVER_NOT_FOUND
+                                    || reason == CallDiagnostics.Reason.REMOTE_SERVER_TIMEOUT) {
+                                diagnostics.fail(reason, name);
+                            } else {
+                                diagnostics.confirmFederation(
+                                        CallDiagnostics.FederationEvidence.PING);
+                            }
+                        } else {
+                            diagnostics.event(
+                                    CallDiagnostics.EventType.SERVER_PING, domain + " - timeout");
+                        }
+                    }
+                },
+                MoreExecutors.directExecutor());
     }
 
     public void setTerminalSessionState(

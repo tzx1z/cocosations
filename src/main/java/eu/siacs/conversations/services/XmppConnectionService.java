@@ -110,6 +110,7 @@ import eu.siacs.conversations.xmpp.OnUpdateBlocklist;
 import eu.siacs.conversations.xmpp.XmppConnection;
 import eu.siacs.conversations.xmpp.forms.Data;
 import eu.siacs.conversations.xmpp.jingle.AbstractJingleConnection;
+import eu.siacs.conversations.xmpp.jingle.CallReportStore;
 import eu.siacs.conversations.xmpp.jingle.JingleRtpConnection;
 import eu.siacs.conversations.xmpp.jingle.Media;
 import eu.siacs.conversations.xmpp.jingle.RtpEndUserState;
@@ -2533,6 +2534,7 @@ public class XmppConnectionService extends Service {
                             Log.d(Config.LOGTAG, "deleted account from database");
                         }
                     });
+            CallReportStore.of(this).deleteAccountAsync(account.getUuid());
             this.accounts.remove(account);
             if (CallIntegration.hasSystemFeature(this)) {
                 CallIntegrationConnectionService.unregisterPhoneAccount(this, account);

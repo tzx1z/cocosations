@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingHorizontal="14dp"
+        android:paddingTop="16dp"
+        android:visibility="gone"
+        tools:visibility="visible">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:baselineAligned="false"
+            android:importantForAccessibility="noHideDescendants"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="2dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <View
+                    android:id="@+id/segment_server"
+                    android:layout_width="match_parent"
+                    android:layout_height="6dp"
+                    android:background="@drawable/cocosations_call_stage_segment" />
+
+                <TextView
+                    android:id="@+id/label_server"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:ellipsize="end"
+                    android:gravity="center_horizontal"
+                    android:singleLine="true"
+                    android:text="@string/cocosations_call_stage_server"
+                    android:textAppearance="?textAppearanceLabelSmall" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="2dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <View
+                    android:id="@+id/segment_federation"
+                    android:layout_width="match_parent"
+                    android:layout_height="6dp"
+                    android:background="@drawable/cocosations_call_stage_segment" />
+
+                <TextView
+                    android:id="@+id/label_federation"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:ellipsize="end"
+                    android:gravity="center_horizontal"
+                    android:singleLine="true"
+                    android:text="@string/cocosations_call_stage_federation"
+                    android:textAppearance="?textAppearanceLabelSmall" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="2dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <View
+                    android:id="@+id/segment_peer"
+                    android:layout_width="match_parent"
+                    android:layout_height="6dp"
+                    android:background="@drawable/cocosations_call_stage_segment" />
+
+                <TextView
+                    android:id="@+id/label_peer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:ellipsize="end"
+                    android:gravity="center_horizontal"
+                    android:singleLine="true"
+                    android:text="@string/cocosations_call_stage_peer"
+                    android:textAppearance="?textAppearanceLabelSmall" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="2dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <View
+                    android:id="@+id/segment_media"
+                    android:layout_width="match_parent"
+                    android:layout_height="6dp"
+                    android:background="@drawable/cocosations_call_stage_segment" />
+
+                <TextView
+                    android:id="@+id/label_media"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:ellipsize="end"
+                    android:gravity="center_horizontal"
+                    android:singleLine="true"
+                    android:text="@string/cocosations_call_stage_media"
+                    android:textAppearance="?textAppearanceLabelSmall" />
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/detail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="2dp"
+            android:layout_marginTop="8dp"
+            android:accessibilityLiveRegion="polite"
+            android:textAppearance="?textAppearanceBodyMedium"
+            tools:text="Waiting for the contact" />
+    </LinearLayout>
+</layout>

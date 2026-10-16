@@ -50,6 +50,21 @@
             android:title="@string/pref_use_relays" />
 
     </PreferenceCategory>
+    <PreferenceCategory android:title="@string/cocosations_pref_category_call_diagnostics">
+        <ListPreference
+            android:defaultValue="@integer/cocosations_call_reports_limit"
+            android:entries="@array/cocosations_call_reports_limits"
+            android:entryValues="@array/cocosations_call_reports_limits"
+            android:icon="@drawable/ic_call_24dp"
+            android:key="call_reports_limit"
+            android:title="@string/cocosations_pref_call_reports_limit" />
+        <SwitchPreferenceCompat
+            android:defaultValue="@bool/cocosations_call_logging"
+            android:icon="@drawable/ic_description_24dp"
+            android:key="call_logging"
+            android:summary="@string/cocosations_pref_call_logging_summary"
+            android:title="@string/cocosations_pref_call_logging" />
+    </PreferenceCategory>
     <PreferenceCategory android:title="@string/pref_category_application">
         <SwitchPreferenceCompat
             android:defaultValue="@bool/send_crash_reports"

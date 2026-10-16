@@ -66,6 +66,10 @@
                 android:visibility="visible"
                 tools:text="jcapulet@example.com" />
 
+            <include
+                android:id="@+id/call_stages"
+                layout="@layout/cocosations_call_stages" />
+
             <View
                 android:layout_width="match_parent"
                 android:layout_height="32dp" />
@@ -123,6 +127,42 @@
                 android:fontFamily="monospace"
                 android:textAppearance="?textAppearanceTitleLarge"
                 tools:text="01:23" />
+
+            <com.google.android.material.chip.Chip
+                android:id="@+id/quality_indicator"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_below="@+id/duration"
+                android:layout_centerHorizontal="true"
+                android:layout_marginTop="8dp"
+                android:visibility="gone"
+                app:chipIcon="@drawable/cocosations_ic_signal_3_24dp"
+                tools:text="Good · RTT 42 ms"
+                tools:visibility="visible" />
+
+            <LinearLayout
+                android:id="@+id/quality_charts"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_below="@+id/quality_indicator"
+                android:layout_marginHorizontal="32dp"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical"
+                android:visibility="gone"
+                tools:visibility="visible">
+
+                <include
+                    android:id="@+id/quality_mos"
+                    layout="@layout/cocosations_quality_chart_row" />
+
+                <include
+                    android:id="@+id/quality_rtt"
+                    layout="@layout/cocosations_quality_chart_row" />
+
+                <include
+                    android:id="@+id/quality_loss_in"
+                    layout="@layout/cocosations_quality_chart_row" />
+            </LinearLayout>
 
             <com.google.android.material.imageview.ShapeableImageView
                 android:id="@+id/contact_photo"

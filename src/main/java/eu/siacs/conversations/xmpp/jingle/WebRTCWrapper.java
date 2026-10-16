@@ -14,6 +14,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
+import eu.siacs.conversations.AppSettings;
 import eu.siacs.conversations.Config;
 import eu.siacs.conversations.services.XmppConnectionService;
 import eu.siacs.conversations.xmpp.manager.JingleManager;
@@ -34,11 +35,14 @@ import org.webrtc.DefaultVideoDecoderFactory;
 import org.webrtc.DefaultVideoEncoderFactory;
 import org.webrtc.EglBase;
 import org.webrtc.IceCandidate;
+import org.webrtc.IceCandidateErrorEvent;
+import org.webrtc.Logging;
 import org.webrtc.MediaConstraints;
 import org.webrtc.MediaStream;
 import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnectionFactory;
+import org.webrtc.RTCStatsCollectorCallback;
 import org.webrtc.RtpReceiver;
 import org.webrtc.RtpTransceiver;
 import org.webrtc.SdpObserver;
@@ -47,6 +51,8 @@ import org.webrtc.VideoTrack;
 import org.webrtc.audio.JavaAudioDeviceModule;
 
 public class WebRTCWrapper {
+
+    private static boolean nativeLoggingEnabled = false;
 
     private static final String EXTENDED_LOGGING_TAG = WebRTCWrapper.class.getSimpleName();
 
@@ -83,6 +89,8 @@ public class WebRTCWrapper {
     private TrackWrapper<AudioTrack> localAudioTrack = null;
     private TrackWrapper<VideoTrack> localVideoTrack = null;
     private VideoTrack remoteVideoTrack = null;
+    // пишется в коллбэке на signaling-потоке, читается под synchronized
+    private volatile RtpReceiver remoteAudioReceiver = null;
 
     private final SettableFuture<Void> iceGatheringComplete = SettableFuture.create();
     private final PeerConnection.Observer peerConnectionObserver =
@@ -119,12 +127,28 @@ public class WebRTCWrapper {
                     Log.d(
                             EXTENDED_LOGGING_TAG,
                             "onIceConnectionChange(" + iceConnectionState + ")");
+                    eventCallback.onIceConnectionChange(iceConnectionState);
+                }
+
+                @Override
+                public void onIceCandidateError(final IceCandidateErrorEvent event) {
+                    Log.d(
+                            EXTENDED_LOGGING_TAG,
+                            "onIceCandidateError("
+                                    + event.url
+                                    + ", "
+                                    + event.errorCode
+                                    + ", "
+                                    + event.errorText
+                                    + ")");
+                    eventCallback.onIceCandidateError(event);
                 }
 
                 @Override
                 public void onSelectedCandidatePairChanged(CandidatePairChangeEvent event) {
                     Log.d(Config.LOGTAG, "remote candidate selected: " + event.remote);
                     Log.d(Config.LOGTAG, "local candidate selected: " + event.local);
+                    eventCallback.onSelectedCandidatePairChanged(event.local, event.remote);
                 }
 
                 @Override
@@ -134,6 +158,7 @@ public class WebRTCWrapper {
                 public void onIceGatheringChange(
                         final PeerConnection.IceGatheringState iceGatheringState) {
                     Log.d(EXTENDED_LOGGING_TAG, "onIceGatheringChange(" + iceGatheringState + ")");
+                    eventCallback.onIceGatheringChange(iceGatheringState);
                     if (iceGatheringState == PeerConnection.IceGatheringState.COMPLETE) {
                         iceGatheringComplete.set(null);
                     }
@@ -142,6 +167,9 @@ public class WebRTCWrapper {
                 @Override
                 public void onIceCandidate(final IceCandidate iceCandidate) {
                     requiresArtificialFail = false;
+                    // кандидаты могут ждать в очереди до готовности сигналинга; для диагностики
+                    // фиксируем момент сбора
+                    eventCallback.onLocalIceCandidateGathered(iceCandidate);
                     if (readyToReceivedIceCandidates.get()) {
                         eventCallback.onIceCandidate(iceCandidate);
                     } else {
@@ -192,6 +220,8 @@ public class WebRTCWrapper {
                                     + ")");
                     if (track instanceof VideoTrack) {
                         remoteVideoTrack = (VideoTrack) track;
+                    } else if (track instanceof AudioTrack) {
+                        remoteAudioReceiver = rtpReceiver;
                     }
                 }
 
@@ -240,12 +270,27 @@ public class WebRTCWrapper {
         } catch (final UnsatisfiedLinkError e) {
             throw new InitializationException("Unable to initialize PeerConnectionFactory", e);
         }
+        configureNativeLogging(new AppSettings(service).isCallLogging());
         try {
             this.eglBase = EglBase.create();
         } catch (final RuntimeException e) {
             throw new InitializationException("Unable to create EGL base", e);
         }
         this.context = service;
+    }
+
+    // подробный лог libwebrtc нужен только для лога звонка. Включенный однажды вывод
+    // перенаправляет и Java-логи WebRTC в нативный, поэтому выключаем его только после себя
+    private static void configureNativeLogging(final boolean enabled) {
+        synchronized (WebRTCWrapper.class) {
+            if (enabled) {
+                Logging.enableLogToDebugOutput(Logging.Severity.LS_INFO);
+                nativeLoggingEnabled = true;
+            } else if (nativeLoggingEnabled) {
+                Logging.enableLogToDebugOutput(Logging.Severity.LS_NONE);
+                nativeLoggingEnabled = false;
+            }
+        }
     }
 
     synchronized void initializePeerConnection(
@@ -459,6 +504,34 @@ public class WebRTCWrapper {
                 "setIsReadyToReceiveCandidates(" + ready + ") was=" + was + " is=" + is);
     }
 
+    // synchronized вместе с close(): getStats() на освобожденном PeerConnection обращается к
+    // уже удаленному нативному объекту
+    synchronized void collectStats(final RTCStatsCollectorCallback callback) {
+        final PeerConnection peerConnection = this.peerConnection;
+        if (peerConnection == null) {
+            return;
+        }
+        try {
+            peerConnection.getStats(callback);
+        } catch (final IllegalStateException e) {
+            Log.d(EXTENDED_LOGGING_TAG, "unable to collect stats", e);
+        }
+    }
+
+    /** Отчет только по входящему звуку: несколько записей вместо полного getStats(). */
+    synchronized void collectIncomingAudioStats(final RTCStatsCollectorCallback callback) {
+        final PeerConnection peerConnection = this.peerConnection;
+        final RtpReceiver receiver = this.remoteAudioReceiver;
+        if (peerConnection == null || receiver == null) {
+            return;
+        }
+        try {
+            peerConnection.getStats(receiver, callback);
+        } catch (final IllegalStateException e) {
+            Log.d(EXTENDED_LOGGING_TAG, "unable to collect incoming audio stats", e);
+        }
+    }
+
     synchronized void close() {
         final PeerConnection peerConnection = this.peerConnection;
         final PeerConnectionFactory peerConnectionFactory = this.peerConnectionFactory;
@@ -470,6 +543,7 @@ public class WebRTCWrapper {
         }
         this.localVideoTrack = null;
         this.remoteVideoTrack = null;
+        this.remoteAudioReceiver = null;
         if (videoSourceWrapper != null) {
             this.videoSourceWrapper = null;
             try {
@@ -775,6 +849,16 @@ public class WebRTCWrapper {
         void onConnectionChange(PeerConnection.PeerConnectionState newState);
 
         void onRenegotiationNeeded();
+
+        default void onIceConnectionChange(PeerConnection.IceConnectionState newState) {}
+
+        default void onIceGatheringChange(PeerConnection.IceGatheringState newState) {}
+
+        default void onLocalIceCandidateGathered(IceCandidate iceCandidate) {}
+
+        default void onSelectedCandidatePairChanged(IceCandidate local, IceCandidate remote) {}
+
+        default void onIceCandidateError(IceCandidateErrorEvent event) {}
     }
 
     public abstract static class SetSdpObserver implements SdpObserver {

@@ -22,6 +22,7 @@ import eu.siacs.conversations.ui.ConversationFragment;
 import eu.siacs.conversations.ui.XmppActivity;
 import eu.siacs.conversations.ui.util.Attachment;
 import eu.siacs.conversations.ui.util.AvatarWorkerTask;
+import eu.siacs.conversations.ui.util.LastSeenBadge;
 import eu.siacs.conversations.utils.IrregularUnicodeDetector;
 import eu.siacs.conversations.utils.UIHelper;
 import eu.siacs.conversations.xmpp.Jid;
@@ -65,6 +66,12 @@ public class ConversationAdapter
                     IrregularUnicodeDetector.style(activity, (Jid) name));
         } else {
             viewHolder.binding.conversationName.setText(name);
+        }
+
+        if (conversation.getMode() == Conversation.MODE_SINGLE) {
+            LastSeenBadge.bind(viewHolder.binding.conversationLastSeen, conversation.getContact());
+        } else {
+            viewHolder.binding.conversationLastSeen.setVisibility(View.GONE);
         }
 
         if (conversation == ConversationFragment.getConversation(activity)) {

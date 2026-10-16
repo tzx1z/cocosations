@@ -8,6 +8,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.telecom.TelecomManager;
 import android.util.Log;
 import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
@@ -15,10 +16,12 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.preference.Preference;
 import com.google.common.base.Optional;
+import com.google.common.collect.ImmutableList;
 import eu.siacs.conversations.AppSettings;
 import eu.siacs.conversations.Config;
 import eu.siacs.conversations.R;
 import eu.siacs.conversations.services.CallIntegration;
+import eu.siacs.conversations.services.CallIntegrationConnectionService;
 import eu.siacs.conversations.services.NotificationService;
 import eu.siacs.conversations.ui.activity.result.PickRingtone;
 import eu.siacs.conversations.utils.Compatibility;
@@ -92,6 +95,10 @@ public class NotificationsSettingsFragment extends XmppPreferenceFragment {
             fullscreenNotification.setVisible(false);
         }
         callIntegration.setVisible(CallIntegration.selfManagedAvailable(requireContext()));
+        final var systemDialerCalls = findPreference(AppSettings.SYSTEM_DIALER_CALLS);
+        if (systemDialerCalls != null) {
+            systemDialerCalls.setVisible(CallIntegration.selfManagedAvailable(requireContext()));
+        }
     }
 
     @Override
@@ -130,6 +137,28 @@ public class NotificationsSettingsFragment extends XmppPreferenceFragment {
         super.onSharedPreferenceChanged(key);
         if (key.equals(AppSettings.KEEP_FOREGROUND_SERVICE)) {
             requireService().toggleForegroundService();
+        } else if (key.equals(AppSettings.SYSTEM_DIALER_CALLS)
+                || key.equals(AppSettings.CALL_INTEGRATION)) {
+            CallIntegrationConnectionService.toggleSystemDialerAccountsAsync(
+                    requireContext(), ImmutableList.copyOf(requireService().getAccounts()));
+            if (key.equals(AppSettings.SYSTEM_DIALER_CALLS)
+                    && appSettings().isSystemDialerCalls()) {
+                openCallingAccounts();
+            }
+        }
+    }
+
+    // входящий на учетную запись звонков Telecom принимает, только если она включена вручную
+    private void openCallingAccounts() {
+        Toast.makeText(
+                        requireContext(),
+                        R.string.cocosations_system_dialer_enable_account,
+                        Toast.LENGTH_LONG)
+                .show();
+        try {
+            startActivity(new Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS));
+        } catch (final ActivityNotFoundException e) {
+            Log.w(Config.LOGTAG, "calling accounts settings are not available", e);
         }
     }
 

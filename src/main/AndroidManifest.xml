@@ -135,6 +135,15 @@
             </intent-filter>
         </service>
 
+        <service
+            android:name=".services.SystemDialerConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".receiver.SystemEventReceiver"
             android:exported="true">
@@ -189,6 +198,18 @@
         <activity
             android:name=".ui.EditHistoryActivity"
             android:label="@string/edit_history" />
+        <!-- отдельная задача: экран звонка singleInstance, и Back с отчета должен вернуть к нему -->
+        <activity
+            android:name=".ui.CallDiagnosticsActivity"
+            android:autoRemoveFromRecents="true"
+            android:label="@string/cocosations_call_diagnostics"
+            android:taskAffinity="" />
+        <activity
+            android:name=".ui.CallJournalActivity"
+            android:label="@string/cocosations_call_journal" />
+        <activity
+            android:name=".ui.NetworkCheckActivity"
+            android:label="@string/cocosations_network_check" />
         <activity
             android:name=".ui.RecordingActivity"
             android:configChanges="orientation|screenSize"

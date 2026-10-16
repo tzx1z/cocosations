@@ -14,6 +14,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_call_journal"
+        android:orderInCategory="95"
+        android:title="@string/cocosations_call_journal"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_settings"
         android:orderInCategory="100"
         android:title="@string/action_settings"

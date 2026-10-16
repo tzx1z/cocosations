@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="cocosations_status_ok">#ff81c784</color>
+    <color name="cocosations_status_warning">#ffffb74d</color>
+</resources>

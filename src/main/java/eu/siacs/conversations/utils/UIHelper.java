@@ -125,6 +125,67 @@ public class UIHelper {
         }
     }
 
+    /** Короткая метка для списка контактов: только что, N мин, N ч, N дн, затем дата. */
+    public static String lastSeenAgo(final Context context, final long timestamp) {
+        final var ago = LastSeenAgo.of(System.currentTimeMillis(), timestamp);
+        return switch (ago.unit()) {
+            case JUST_NOW -> context.getString(R.string.cocosations_last_seen_just_now);
+            case MINUTES -> context.getString(R.string.cocosations_last_seen_minutes, ago.amount());
+            case HOURS -> context.getString(R.string.cocosations_last_seen_hours, ago.amount());
+            case DAYS -> context.getString(R.string.cocosations_last_seen_days, ago.amount());
+            case DATE ->
+                    DateUtils.formatDateTime(
+                            context,
+                            timestamp,
+                            DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_ABBREV_ALL);
+        };
+    }
+
+    public static String lastSeenExact(final Context context, final long timestamp) {
+        final var exact =
+                DateUtils.formatDateTime(
+                        context,
+                        timestamp,
+                        DateUtils.FORMAT_SHOW_DATE
+                                | DateUtils.FORMAT_SHOW_YEAR
+                                | DateUtils.FORMAT_SHOW_TIME
+                                | DateUtils.FORMAT_ABBREV_MONTH);
+        return context.getString(
+                R.string.cocosations_last_activity_exact, exact, lastSeenAgo(context, timestamp));
+    }
+
+    public record LastSeenAgo(Unit unit, long amount) {
+
+        public enum Unit {
+            JUST_NOW,
+            MINUTES,
+            HOURS,
+            DAYS,
+            DATE
+        }
+
+        private static final long MINUTE = 60;
+        private static final long HOUR = 60 * MINUTE;
+        private static final long DAY = 24 * HOUR;
+        private static final long DAYS_BEFORE_DATE = 30;
+
+        public static LastSeenAgo of(final long now, final long timestamp) {
+            // время из будущего (сдвиг часов у собеседника) считаем текущим
+            final long seconds = Math.max(0, (now - timestamp) / 1000);
+            if (seconds < MINUTE) {
+                return new LastSeenAgo(Unit.JUST_NOW, 0);
+            } else if (seconds < HOUR) {
+                return new LastSeenAgo(Unit.MINUTES, seconds / MINUTE);
+            } else if (seconds < DAY) {
+                return new LastSeenAgo(Unit.HOURS, seconds / HOUR);
+            } else if (seconds < DAYS_BEFORE_DATE * DAY) {
+                return new LastSeenAgo(Unit.DAYS, seconds / DAY);
+            } else {
+                return new LastSeenAgo(Unit.DATE, 0);
+            }
+        }
+    }
+
     @ColorInt
     public static int getColorForName(final String name) {
         return XEP0392Helper.rgbFromNick(name);

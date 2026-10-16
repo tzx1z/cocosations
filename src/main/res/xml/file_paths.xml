@@ -18,4 +18,7 @@
     <cache-path
         name="recordings"
         path="Recordings" />
+    <cache-path
+        name="cocosations_share"
+        path="cocosations_share/" />
 </paths>

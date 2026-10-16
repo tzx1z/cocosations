@@ -3,10 +3,13 @@ package im.conversations.android.xmpp.model.stanza;
 import com.google.common.base.Strings;
 import im.conversations.android.annotation.XmlElement;
 import im.conversations.android.xmpp.model.capabilties.EntityCapabilities;
+import im.conversations.android.xmpp.model.delay.Delay;
 import im.conversations.android.xmpp.model.idle.Idle;
 import im.conversations.android.xmpp.model.idle.LastUserInteraction;
 import im.conversations.android.xmpp.model.jabber.Show;
 import im.conversations.android.xmpp.model.jabber.Status;
+import im.conversations.android.xmpp.model.last.Query;
+import java.time.Instant;
 import java.util.Locale;
 
 @XmlElement
@@ -72,6 +75,27 @@ public class Presence extends Stanza implements EntityCapabilities {
         } else {
             return LastUserInteraction.none();
         }
+    }
+
+    /**
+     * Последняя активность из XEP-0319, иначе из XEP-0256. Для unavailable без этих элементов
+     * берется метка delay: сервер хранит ее с момента выхода пользователя.
+     */
+    public Instant getLastActivity(final Instant received) {
+        final var idle = getExtension(Idle.class);
+        final var since = idle == null ? null : idle.getSince();
+        if (since != null) {
+            return since;
+        }
+        final var delay = getExtension(Delay.class);
+        final var stamp = delay == null ? null : delay.getStamp();
+        final var query = getExtension(Query.class);
+        final var seconds = query == null ? null : query.getSeconds();
+        if (seconds != null) {
+            // seconds отсчитываются от момента отправки presence, а не от момента получения
+            return (stamp == null ? received : stamp).minusSeconds(seconds);
+        }
+        return getType() == Type.UNAVAILABLE ? stamp : null;
     }
 
     public enum Type {

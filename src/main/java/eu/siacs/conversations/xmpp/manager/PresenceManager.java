@@ -29,16 +29,20 @@ import im.conversations.android.xmpp.model.Extension;
 import im.conversations.android.xmpp.model.capabilties.Capabilities;
 import im.conversations.android.xmpp.model.capabilties.LegacyCapabilities;
 import im.conversations.android.xmpp.model.idle.Idle;
+import im.conversations.android.xmpp.model.idle.LastUserInteraction;
 import im.conversations.android.xmpp.model.nick.Nick;
 import im.conversations.android.xmpp.model.pars.PreAuth;
 import im.conversations.android.xmpp.model.pgp.Signed;
 import im.conversations.android.xmpp.model.stanza.Presence;
 import im.conversations.android.xmpp.model.vcard.update.VCardUpdate;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.openintents.openpgp.util.OpenPgpUtils;
 
 public class PresenceManager extends AbstractManager {
@@ -50,6 +54,10 @@ public class PresenceManager extends AbstractManager {
 
     private final Map<EntityCapabilities.Hash, ServiceDescription> serviceDescriptions =
             new HashMap<>();
+
+    // ростер пишется целиком, поэтому изменения last seen копятся и сбрасываются пачкой
+    private static final long LAST_SEEN_WRITE_DELAY_SECONDS = 30;
+    private final AtomicBoolean lastSeenWriteScheduled = new AtomicBoolean(false);
 
     public PresenceManager(final XmppConnectionService service, final XmppConnection connection) {
         super(service.getApplicationContext(), connection);
@@ -85,6 +93,16 @@ public class PresenceManager extends AbstractManager {
         final var account = getAccount();
         final var contact = getManager(RosterManager.class).getContact(from);
         final int sizeBefore = contact.getPresences().size();
+
+        // старые клиенты сообщают простой через XEP-0256; приводим к XEP-0319, чтобы UI
+        // работал с одним форматом
+        if (!presence.hasExtension(Idle.class)) {
+            final var now = Instant.now();
+            final var lastActivity = presence.getLastActivity(now);
+            if (lastActivity != null && lastActivity.isBefore(now)) {
+                presence.addExtension(new Idle(lastActivity));
+            }
+        }
 
         synchronized (this.presences) {
             remove(this.presences, from);
@@ -144,11 +162,31 @@ public class PresenceManager extends AbstractManager {
         // deliberately ignoring presence from the server
         getManager(DiscoManager.class).clear(from);
 
+        final var now = Instant.now();
+        final Instant lastActivityWhileOnline;
+        final boolean offline;
         synchronized (this.presences) {
+            lastActivityWhileOnline = lastActivity(this.presences.get(from.asBareJid()), now);
             if (from.isBareJid()) {
                 this.presences.removeAll(from.asBareJid());
             } else {
                 remove(this.presences, from);
+            }
+            offline = !this.presences.containsKey(from.asBareJid());
+        }
+        if (offline) {
+            // сервер может приложить к unavailable время выхода (XEP-0256 или delay); если нет,
+            // берем последнюю активность, которую видели, пока контакт был в сети
+            final var reported = packet.getLastActivity(now);
+            final var lastSeen = reported != null ? reported : lastActivityWhileOnline;
+            if (lastSeen != null && contact.setLastSeen(lastSeen.toEpochMilli())) {
+                getManager(LastActivityManager.class)
+                        .recordSource(
+                                from,
+                                reported != null
+                                        ? sourceOf(packet)
+                                        : LastActivityManager.Source.OBSERVED);
+                scheduleLastSeenWrite();
             }
         }
         this.service.onContactStatusChanged.onContactStatusChanged(contact, false);
@@ -220,12 +258,75 @@ public class PresenceManager extends AbstractManager {
     }
 
     public void clear() {
+        final var now = Instant.now();
+        final Map<Jid, Instant> lastActivities = new HashMap<>();
         synchronized (this.presences) {
+            // без соединения статус контактов неизвестен:
+            // запоминаем, когда видели их в последний раз
+            for (final var address : this.presences.keySet()) {
+                lastActivities.put(address, lastActivity(this.presences.get(address), now));
+            }
             for (final var presence : this.presences.values()) {
                 getManager(DiscoManager.class).clear(presence.getFrom());
             }
             this.presences.clear();
         }
+        // RosterManager берет свою блокировку, поэтому контакты обновляем вне блокировки presences
+        boolean lastSeenChanged = false;
+        for (final var entry : lastActivities.entrySet()) {
+            final var contact =
+                    getManager(RosterManager.class).getContactFromContactList(entry.getKey());
+            if (contact != null
+                    && entry.getValue() != null
+                    && contact.setLastSeen(entry.getValue().toEpochMilli())) {
+                getManager(LastActivityManager.class)
+                        .recordSource(entry.getKey(), LastActivityManager.Source.OBSERVED);
+                lastSeenChanged = true;
+            }
+        }
+        if (lastSeenChanged) {
+            getManager(RosterManager.class).writeToDatabaseAsync();
+        }
+    }
+
+    // порядок проверки тот же, что в Presence.getLastActivity()
+    static LastActivityManager.Source sourceOf(final Presence presence) {
+        final var idle = presence.getExtension(Idle.class);
+        if (idle != null && idle.getSince() != null) {
+            return LastActivityManager.Source.XEP_0319;
+        }
+        final var query =
+                presence.getExtension(im.conversations.android.xmpp.model.last.Query.class);
+        if (query != null && query.getSeconds() != null) {
+            return LastActivityManager.Source.XEP_0256;
+        }
+        return LastActivityManager.Source.DELAY;
+    }
+
+    private void scheduleLastSeenWrite() {
+        if (lastSeenWriteScheduled.compareAndSet(false, true)) {
+            FUTURE_TIMEOUT_EXECUTOR.schedule(
+                    () -> {
+                        lastSeenWriteScheduled.set(false);
+                        getManager(RosterManager.class).writeToDatabaseAsync();
+                    },
+                    LAST_SEEN_WRITE_DELAY_SECONDS,
+                    TimeUnit.SECONDS);
+        }
+    }
+
+    private static Instant lastActivity(final Collection<Presence> presences, final Instant now) {
+        Instant latest = null;
+        for (final var presence : presences) {
+            final Instant activity =
+                    presence.getLastUserInteraction() instanceof LastUserInteraction.Idle idle
+                            ? idle.getSince()
+                            : now;
+            if (latest == null || activity.isAfter(latest)) {
+                latest = activity;
+            }
+        }
+        return latest;
     }
 
     public List<Presence> getPresences(final Jid address) {

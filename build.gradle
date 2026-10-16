@@ -109,11 +109,12 @@ android {
 
     defaultConfig {
         minSdk = 23
-        versionCode = 42181
-        versionName = '2.20.4'
-        applicationId = 'eu.siacs.conversations'
+        // версия upstream и номер выпуска форка: 42181 и 2.20.4 -> 421811 и 2.20.4.1
+        versionCode = 421811
+        versionName = '2.20.4.1'
+        applicationId = 'dev.inkov.cocosations'
         resValue('string', 'applicationId', applicationId)
-        def appName = "Conversations"
+        def appName = "Cocosations"
         resValue('string', 'app_name', appName)
         buildConfigField('String', 'APP_NAME', "\"${appName}\"")
     }
