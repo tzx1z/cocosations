@@ -1,0 +1,252 @@
+# Сборка выпуска. Запускается коммитом в ветку deploy, который меняет
+# release-tag: в нем тег выпуска и полный хеш его коммита в main.
+#
+# Если релиз с этим тегом уже опубликован, собранные APK только сверяются с
+# ним, как это делает F-Droid. Иначе после подтверждения в environment release
+# APK подписываются и выкладываются в черновик релиза. Тег на GitHub
+# отправляется после этого, вместе с публикацией черновика: F-Droid начинает
+# сборку по новому тегу, и APK к этому моменту уже должны быть в релизе.
+name: release
+
+on:
+  push:
+    branches: [deploy]
+    paths: [release-tag]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # образ из image.yml (20261016-9b4e2cf), только по digest
+  IMAGE: ghcr.io/tzx1z/cocosations-build@sha256:205621d70b02396b75bfda06c21f2da7e36eb00dcb933d51ef640c516634f475
+  APPID: dev.inkov.cocosations
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      commit: ${{ steps.source.outputs.commit }}
+      published: ${{ steps.source.outputs.published }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Source
+        id: source
+        run: |
+          read -r tag commit _ < release-tag || true
+          if ! [[ $tag =~ ^v[0-9]+(\.[0-9]+)+$ && $commit =~ ^[0-9a-f]{40}$ ]]; then
+            echo "в release-tag ожидается '<тег> <полный хеш коммита>'" >&2
+            exit 1
+          fi
+          git clone -q "https://github.com/$GITHUB_REPOSITORY.git" "$RUNNER_TEMP/src"
+          cd "$RUNNER_TEMP/src"
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "коммита $commit нет в main" >&2
+            exit 1
+          fi
+          remote=$(git rev-parse -q --verify "refs/tags/$tag^{commit}") || true
+          if [ -n "$remote" ] && [ "$remote" != "$commit" ]; then
+            echo "тег $tag на GitHub указывает на $remote, а не на $commit" >&2
+            exit 1
+          fi
+          git -c advice.detachedHead=false checkout -q "$commit"
+          published=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts \
+            --limit 1000 --json tagName --jq "any(.[]; .tagName == \"$tag\")")
+
+          version=${tag#v}
+          if [ "$published" = false ]; then
+            # из versionName рецепт F-Droid строит ссылки binary: на файлы релиза
+            name=$(sed -n "s/^ *versionName = '\(.*\)'$/\1/p" build.gradle)
+            if [ "$name" != "$version" ]; then
+              echo "versionName $name в build.gradle не совпадает с тегом $tag" >&2
+              exit 1
+            fi
+          fi
+          {
+            echo "tag=$tag"
+            echo "commit=$commit"
+            echo "published=$published"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "TAG=$tag"
+            echo "VERSION=$version"
+            echo "COMMIT=$commit"
+            echo "PUBLISHED=$published"
+          } >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          src=$RUNNER_TEMP/src
+          # тот же prebuild, что в рецепте F-Droid
+          sed -i -e 's/universalApk = true/universalApk = false/' "$src/build.gradle"
+          # путь сборки как на buildserver F-Droid
+          docker run --rm -v "$src:/home/vagrant/build/$APPID" "$IMAGE" \
+            ./gradlew --no-daemon assembleConversationsFreeRelease
+
+      - name: Collect
+        run: |
+          src=$RUNNER_TEMP/src
+          out=$RUNNER_TEMP/apk
+          mkdir -p "$out"
+          for apk in "$src"/build/outputs/apk/conversationsFree/release/*.apk; do
+            name=${apk##*/}
+            revision=$(unzip -p "$apk" META-INF/version-control-info.textproto \
+              | sed -n 's/^ *revision: "\(.*\)"$/\1/p') || true
+            if [ "$revision" != "$COMMIT" ]; then
+              echo "$name собран из ${revision:-неизвестного коммита}, ожидается $COMMIT" >&2
+              exit 1
+            fi
+            # имя как в ссылках binary: рецепта F-Droid; у 2.20.4.1 в
+            # versionName был суффикс +free, поэтому версия берется из тега
+            cp "$apk" "$out/$APPID-$VERSION-${name#"$APPID"-*-}"
+          done
+          count=$(find "$out" -name '*.apk' | wc -l)
+          if [ "$count" -ne 4 ]; then
+            echo "собрано APK: $count, ожидается 4" >&2
+            exit 1
+          fi
+
+          if [ "$PUBLISHED" = false ]; then
+            code=$(sed -n 's/^ *versionCode = \([0-9]*\)$/\1/p' "$src/build.gradle")
+            # список изменений лежит под кодом arm64-v8a, самым большим из ABI
+            changelog=$src/fastlane/metadata/android/en-US/changelogs/$((code * 100 + 4)).txt
+            {
+              cat "$changelog"
+              echo
+              echo "Most phones need the arm64-v8a APK. F-Droid repository with updates: https://fdroid.inkov.dev"
+              echo
+              echo "Signing certificate SHA-256: 015df71201ff6e6ca0db7b666bd4ae4fb24386199e80e4475f70a4c6233eb78f"
+            } > "$out/notes.md"
+          fi
+
+          {
+            echo "### $TAG ($COMMIT), неподписанные APK"
+            echo
+            echo '```'
+            (cd "$out" && sha256sum -- *.apk)
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned
+          path: ${{ runner.temp }}/apk
+          if-no-files-found: error
+          retention-days: 3
+          # APK уже сжаты
+          compression-level: 0
+
+  # Релиз уже опубликован: сверка со сборкой, как в F-Droid
+  verify:
+    needs: build
+    if: needs.build.outputs.published == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned
+          path: ${{ runner.temp }}/unsigned
+
+      - name: Compare with release
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.apk' \
+            --dir "$RUNNER_TEMP/signed"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker run --rm -v "$GITHUB_WORKSPACE/check.sh:/check.sh:ro" \
+            -v "$RUNNER_TEMP/signed:/signed:ro" -v "$RUNNER_TEMP/unsigned:/unsigned:ro" \
+            "$IMAGE" sh /check.sh /signed /unsigned
+
+  release:
+    needs: build
+    if: needs.build.outputs.published == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      packages: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.build.outputs.tag }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned
+          path: ${{ runner.temp }}/unsigned
+
+      - name: Sign
+        env:
+          KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+          KS_PASS: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          ks=$RUNNER_TEMP/release.p12
+          trap 'rm -f "$ks"' EXIT
+          (umask 077 && base64 -d <<< "$KEYSTORE" > "$ks")
+          mkdir -p "$RUNNER_TEMP/signed"
+          # apksigner из build-tools 35+ подписывает так, что apksigcopier
+          # F-Droid не может перенести подпись, поэтому 34.0.0
+          docker run --rm -e KS_PASS -v "$ks:/release.p12:ro" \
+            -v "$RUNNER_TEMP/unsigned:/unsigned:ro" -v "$RUNNER_TEMP/signed:/signed" \
+            "$IMAGE" sh -ec '
+              for apk in /unsigned/*.apk; do
+                "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign --ks /release.p12 \
+                  --ks-key-alias cocosations --ks-pass env:KS_PASS --key-pass env:KS_PASS \
+                  --v4-signing-enabled false --in "$apk" --out "/signed/${apk##*/}"
+              done'
+
+      - name: Check
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE/check.sh:/check.sh:ro" \
+            -v "$RUNNER_TEMP/signed:/signed:ro" -v "$RUNNER_TEMP/unsigned:/unsigned:ro" \
+            "$IMAGE" sh /check.sh /signed /unsigned
+
+      - name: Draft release
+        run: |
+          cd "$RUNNER_TEMP/signed"
+          sha256sum -- *.apk > SHA256SUMS
+          # черновик прошлого запуска с тем же тегом
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.draft and .tag_name == \"$TAG\") | .id" \
+            | while read -r id; do
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+              done
+          # Тега на GitHub еще может не быть: у черновика тег создается только
+          # при публикации, поэтому указывается коммит
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$COMMIT" \
+            --title "Cocosations ${TAG#v}" --notes-file "$RUNNER_TEMP/unsigned/notes.md" \
+            ./*.apk SHA256SUMS
+          {
+            echo "### Черновик релиза $TAG готов"
+            echo
+            echo "Публикация: \`fdroid/ci-release.sh publish $TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
