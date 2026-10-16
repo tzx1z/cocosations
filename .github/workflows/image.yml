@@ -1,0 +1,51 @@
+# Образ сборки для release.yml. Собирается при изменении Containerfile в ветке
+# deploy. release.yml берет образ по digest, поэтому новый образ используется
+# только после того, как его digest из итогов этого запуска перенесен в
+# release.yml отдельным коммитом.
+name: image
+
+on:
+  push:
+    branches: [deploy]
+    paths: [Containerfile]
+
+permissions: {}
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image=ghcr.io/$GITHUB_REPOSITORY_OWNER/cocosations-build
+          tag=$(date -u +%Y%m%d)-${GITHUB_SHA::7}
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # метка связывает пакет с репозиторием: без нее release.yml не получит
+          # доступ к приватному пакету
+          docker build --pull \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            -t "$image:$tag" - < Containerfile
+          docker push "$image:$tag"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image:$tag")
+          {
+            echo "### Образ $image:$tag"
+            echo
+            echo "Для release.yml: \`IMAGE: $digest\`"
+            echo
+            echo '```'
+            docker run --rm "$image:$tag" sh -c '
+              dpkg-query -W openjdk-25-jdk-headless sdkmanager apksigcopier
+              grep -H "^Pkg.Revision" "$ANDROID_HOME"/*/*/source.properties \
+                "$ANDROID_HOME"/platform-tools/source.properties'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
